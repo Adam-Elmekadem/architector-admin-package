@@ -696,6 +696,7 @@ BLADE;
             const selectedEntityFromRoute = configEl ? (configEl.dataset.selectedEntity || '') : '';
             const statusEl = document.getElementById('api-status');
             let editId = null;
+            let crudSchema = null;
 
             const selectedEntity = (selectedEntityFromRoute && entitySlugs.includes(selectedEntityFromRoute))
                 ? selectedEntityFromRoute
@@ -703,6 +704,10 @@ BLADE;
 
             function crudRecordsEndpoint() {
                 return endpoint + '/' + selectedEntity + '/records';
+            }
+
+            function crudSchemaEndpoint() {
+                return endpoint + '/' + selectedEntity + '/schema';
             }
 
             function apiRecordsEndpoint() {
@@ -941,16 +946,18 @@ BLADE;
                         const row = records.find(function (item) {
                             return Number(item.id) === id;
                         }) || {};
-                        const nameInput = document.getElementById('crud-name');
-                        const emailInput = document.getElementById('crud-email');
-                        const phoneInput = document.getElementById('crud-phone');
-                        const statusInput = document.getElementById('crud-status');
                         const submitLabel = document.getElementById('crud-submit-label');
 
-                        if (nameInput) nameInput.value = row.name || '';
-                        if (emailInput) emailInput.value = row.email || '';
-                        if (phoneInput) phoneInput.value = row.phone || '';
-                        if (statusInput) statusInput.value = row.status || '';
+                        document.querySelectorAll('[data-crud-field]').forEach(function (input) {
+                            const column = input.getAttribute('data-crud-field');
+                            if (!column) {
+                                return;
+                            }
+
+                            const value = row[column];
+                            input.value = value === null || value === undefined ? '' : String(value);
+                        });
+
                         if (submitLabel) submitLabel.textContent = 'Update record';
 
                         editId = id;
@@ -1016,6 +1023,83 @@ BLADE;
                 return records;
             }
 
+            async function fetchCrudSchema() {
+                const response = await fetch(crudSchemaEndpoint(), { headers: { 'Accept': 'application/json' } });
+                if (!response.ok) {
+                    throw new Error('HTTP ' + response.status);
+                }
+
+                const payload = await response.json();
+                const columns = Array.isArray(payload.columns) ? payload.columns : [];
+
+                return {
+                    columns: columns,
+                };
+            }
+
+            function buildCrudDynamicFields(schema) {
+                const container = document.getElementById('crud-dynamic-fields');
+                if (!container) {
+                    return;
+                }
+
+                const columns = Array.isArray(schema && schema.columns) ? schema.columns : [];
+                const editable = columns.filter(function (column) {
+                    return !['id', 'created_at', 'updated_at', 'deleted_at'].includes(column.name);
+                });
+
+                if (editable.length === 0) {
+                    container.innerHTML = '<p class="text-xs text-slate-500 sm:col-span-2 lg:col-span-4">No editable columns found for this entity.</p>';
+                    return;
+                }
+
+                container.innerHTML = editable.map(function (column) {
+                    const col = String(column.name || '');
+                    const label = col.replace(/_/g, ' ').replace(/\b\w/g, function (char) { return char.toUpperCase(); });
+                    const requiredAttr = column.required ? ' required' : '';
+                    const baseClass = 'rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none ring-cyan-200 focus:ring';
+
+                    if (column.is_foreign_key && Array.isArray(column.options) && column.options.length > 0) {
+                        const optionsHtml = ['<option value="">Select ' + label + '</option>'].concat(
+                            column.options.map(function (option) {
+                                return '<option value="' + option.value + '">' + option.label + '</option>';
+                            })
+                        ).join('');
+
+                        return '<div>' +
+                            '<label class="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">' + label + '</label>' +
+                            '<select data-crud-field="' + col + '" class="' + baseClass + '"' + requiredAttr + '>' + optionsHtml + '</select>' +
+                        '</div>';
+                    }
+
+                    const inputType = column.type === 'boolean'
+                        ? 'number'
+                        : (column.type === 'integer' || column.type === 'bigint' || column.type === 'decimal' || column.type === 'float' ? 'number' : (column.type === 'date' ? 'date' : (column.type === 'datetime' ? 'datetime-local' : 'text')));
+                    const stepAttr = inputType === 'number' ? ' step="any"' : '';
+
+                    return '<div>' +
+                        '<label class="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">' + label + '</label>' +
+                        '<input data-crud-field="' + col + '" type="' + inputType + '" class="' + baseClass + '"' + stepAttr + requiredAttr + '>' +
+                    '</div>';
+                }).join('');
+            }
+
+            function collectCrudPayload() {
+                const payload = {};
+
+                document.querySelectorAll('[data-crud-field]').forEach(function (input) {
+                    const column = input.getAttribute('data-crud-field');
+                    if (!column) {
+                        return;
+                    }
+
+                    const raw = (input.value || '').trim();
+                    payload[column] = raw === '' ? null : raw;
+                });
+
+                return payload;
+            }
+
             function initCrudMode() {
                 const panel = document.getElementById('crud-panel');
                 if (!panel) {
@@ -1042,24 +1126,7 @@ BLADE;
                 if (form) {
                     form.addEventListener('submit', async function (event) {
                         event.preventDefault();
-                        const nameInput = document.getElementById('crud-name');
-                        const emailInput = document.getElementById('crud-email');
-                        const phoneInput = document.getElementById('crud-phone');
-                        const statusInput = document.getElementById('crud-status');
-
-                        const payload = {
-                            name: nameInput ? nameInput.value.trim() : '',
-                            email: emailInput ? emailInput.value.trim() : '',
-                            phone: phoneInput ? phoneInput.value.trim() : '',
-                            status: statusInput ? statusInput.value.trim() : '',
-                        };
-
-                        if (!payload.name || !payload.email) {
-                            if (statusEl) {
-                                statusEl.textContent = 'CRUD: Name and Email are required.';
-                            }
-                            return;
-                        }
+                        const payload = collectCrudPayload();
 
                         try {
                             const method = editId === null ? 'POST' : 'PUT';
@@ -1097,7 +1164,13 @@ BLADE;
                     });
                 }
 
-                refreshCrud()
+                fetchCrudSchema()
+                    .then(function (schema) {
+                        crudSchema = schema;
+                        buildCrudDynamicFields(crudSchema);
+
+                        return refreshCrud();
+                    })
                     .then(function (records) {
                         if (statusEl) {
                             statusEl.textContent = 'CRUD: ' + selectedEntity + ' mode enabled (' + records.length + ' records)';
@@ -1254,10 +1327,9 @@ HTML;
     </div>
 
     <form id="crud-form" class="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
-        <input id="crud-name" type="text" placeholder="Name" class="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none ring-cyan-200 focus:ring" required>
-        <input id="crud-email" type="email" placeholder="Email" class="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none ring-cyan-200 focus:ring" required>
-        <input id="crud-phone" type="text" placeholder="Phone" class="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none ring-cyan-200 focus:ring">
-        <input id="crud-status" type="text" placeholder="Status" class="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none ring-cyan-200 focus:ring">
+        <div id="crud-dynamic-fields" class="contents">
+            <p class="text-xs text-slate-500 sm:col-span-2 lg:col-span-4">Loading fields from entity schema...</p>
+        </div>
 
         <div class="sm:col-span-2 lg:col-span-4 flex flex-wrap gap-2 pt-1">
             <button type="submit" class="rounded-lg bg-cyan-600 px-4 py-2 text-xs font-bold text-white hover:bg-cyan-700">
