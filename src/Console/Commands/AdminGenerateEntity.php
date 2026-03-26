@@ -40,7 +40,7 @@ class AdminGenerateEntity extends Command
             $seederClass = $modelClass.'Seeder';
 
             if (! (bool) $this->option('controllers-only')) {
-                $this->generateModel($table, $modelClass);
+                $this->generateModel($table, $modelClass, $tables);
             }
             $this->generateController($table, $modelClass, $controllerClass);
             if (! (bool) $this->option('controllers-only')) {
@@ -150,7 +150,7 @@ class AdminGenerateEntity extends Command
         return Str::studly(Str::singular($table));
     }
 
-    private function generateModel(string $table, string $modelClass): void
+    private function generateModel(string $table, string $modelClass, array $allTables): void
     {
         $path = app_path("Models/{$modelClass}.php");
         if (File::exists($path) && ! (bool) $this->option('force')) {
@@ -166,7 +166,14 @@ class AdminGenerateEntity extends Command
                 implode("\n", array_map(fn ($col) => "        '{$col}',", $fillable)).
                 "\n    ];\n";
 
-        $content = "<?php\n\nnamespace App\\Models;\n\nuse Illuminate\\Database\\Eloquent\\Factories\\HasFactory;\nuse Illuminate\\Database\\Eloquent\\Model;\n\nclass {$modelClass} extends Model\n{\n    use HasFactory;\n\n    protected \$table = '{$table}';\n{$fillableCode}}\n";
+        $relationsCode = $this->modelRelationsCode($table, $allTables);
+        $relationImports = $relationsCode === ''
+            ? ''
+            : "use Illuminate\\Database\\Eloquent\\Relations\\BelongsTo;\n"
+                ."use Illuminate\\Database\\Eloquent\\Relations\\BelongsToMany;\n"
+                ."use Illuminate\\Database\\Eloquent\\Relations\\HasMany;\n";
+
+        $content = "<?php\n\nnamespace App\\Models;\n\nuse Illuminate\\Database\\Eloquent\\Factories\\HasFactory;\nuse Illuminate\\Database\\Eloquent\\Model;\n{$relationImports}\nclass {$modelClass} extends Model\n{\n    use HasFactory;\n\n    protected \$table = '{$table}';\n{$fillableCode}{$relationsCode}}\n";
 
         File::put($path, $content);
         $this->line("Written model: {$path}");
@@ -278,5 +285,143 @@ class AdminGenerateEntity extends Command
 
             return ! in_array($column, ['remember_token'], true);
         }));
+    }
+
+    private function modelRelationsCode(string $table, array $allTables): string
+    {
+        if (! Schema::hasTable($table)) {
+            return '';
+        }
+
+        $methods = [];
+        $methodNames = [];
+
+        // belongsTo relations from local *_id columns
+        foreach ($this->foreignKeyColumnsForTable($table) as $foreignKey) {
+            $base = Str::snake(substr($foreignKey, 0, -3));
+            $targetTable = Str::plural($base);
+
+            if (! in_array($targetTable, $allTables, true) && ! Schema::hasTable($targetTable)) {
+                continue;
+            }
+
+            $method = Str::camel($base);
+            if (in_array($method, $methodNames, true)) {
+                continue;
+            }
+
+            $targetModel = $this->modelClass($targetTable);
+            $methods[] = "    public function {$method}(): BelongsTo\n"
+                ."    {\n"
+                ."        return \$this->belongsTo(\\App\\Models\\{$targetModel}::class, '{$foreignKey}');\n"
+                ."    }";
+            $methodNames[] = $method;
+        }
+
+        // hasMany relations from other tables pointing to this table
+        $selfForeignKey = Str::singular($table).'_id';
+        foreach ($allTables as $otherTable) {
+            if ($otherTable === $table || ! Schema::hasTable($otherTable)) {
+                continue;
+            }
+
+            $otherColumns = Schema::getColumnListing($otherTable);
+            if (! in_array($selfForeignKey, $otherColumns, true)) {
+                continue;
+            }
+
+            $method = Str::camel($otherTable);
+            if (in_array($method, $methodNames, true)) {
+                continue;
+            }
+
+            $otherModel = $this->modelClass($otherTable);
+            $methods[] = "    public function {$method}(): HasMany\n"
+                ."    {\n"
+                ."        return \$this->hasMany(\\App\\Models\\{$otherModel}::class, '{$selfForeignKey}');\n"
+                ."    }";
+            $methodNames[] = $method;
+        }
+
+        // belongsToMany relations through pivot tables
+        foreach ($this->pivotTableMap($allTables) as $pivotTable => $pair) {
+            if (! in_array($table, $pair, true)) {
+                continue;
+            }
+
+            $otherTable = $pair[0] === $table ? $pair[1] : $pair[0];
+            $otherModel = $this->modelClass($otherTable);
+            $method = Str::camel($otherTable);
+
+            if (in_array($method, $methodNames, true)) {
+                $method .= 'Pivot';
+            }
+
+            $currentForeignKey = Str::singular($table).'_id';
+            $otherForeignKey = Str::singular($otherTable).'_id';
+
+            $methods[] = "    public function {$method}(): BelongsToMany\n"
+                ."    {\n"
+                ."        return \$this->belongsToMany(\\App\\Models\\{$otherModel}::class, '{$pivotTable}', '{$currentForeignKey}', '{$otherForeignKey}');\n"
+                ."    }";
+            $methodNames[] = $method;
+        }
+
+        if ($methods === []) {
+            return '';
+        }
+
+        return "\n\n".implode("\n\n", $methods)."\n";
+    }
+
+    private function foreignKeyColumnsForTable(string $table): array
+    {
+        if (! Schema::hasTable($table)) {
+            return [];
+        }
+
+        $columns = Schema::getColumnListing($table);
+
+        return array_values(array_filter($columns, function ($column) {
+            return $column !== 'id' && Str::endsWith($column, '_id');
+        }));
+    }
+
+    private function pivotTableMap(array $tables): array
+    {
+        $map = [];
+
+        foreach ($tables as $table) {
+            if (! Schema::hasTable($table)) {
+                continue;
+            }
+
+            $columns = Schema::getColumnListing($table);
+            $foreignKeys = array_values(array_filter($columns, function ($column) {
+                return $column !== 'id' && Str::endsWith($column, '_id');
+            }));
+
+            if (count($foreignKeys) !== 2) {
+                continue;
+            }
+
+            $allowed = array_merge($foreignKeys, ['created_at', 'updated_at']);
+            $hasOnlyPivotColumns = count(array_diff($columns, $allowed)) === 0;
+
+            if (! $hasOnlyPivotColumns) {
+                continue;
+            }
+
+            $left = Str::plural(Str::beforeLast($foreignKeys[0], '_id'));
+            $right = Str::plural(Str::beforeLast($foreignKeys[1], '_id'));
+
+            if ($left === $right) {
+                continue;
+            }
+
+            $map[$table] = [$left, $right];
+        }
+
+        return $map;
     }
 }
