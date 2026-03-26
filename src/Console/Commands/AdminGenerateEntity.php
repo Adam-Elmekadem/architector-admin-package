@@ -153,6 +153,13 @@ class AdminGenerateEntity extends Command
     private function generateModel(string $table, string $modelClass, array $allTables): void
     {
         $path = app_path("Models/{$modelClass}.php");
+
+        if ($modelClass === 'User' && File::exists($path)) {
+            $this->warn("Skipped protected auth model: {$path}");
+
+            return;
+        }
+
         if (File::exists($path) && ! (bool) $this->option('force')) {
             $this->warn("Skipped existing model: {$path}");
 
