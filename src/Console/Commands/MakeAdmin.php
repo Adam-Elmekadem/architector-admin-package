@@ -552,7 +552,7 @@ PHP;
 <body class="h-screen w-screen bg-linear-to-br {$bodyGradient} text-slate-800">
     <div class="h-screen w-screen p-0">
         <div class="grid h-full w-full rounded-3xl border border-white/70 bg-white/45 shadow-2xl shadow-slate-900/10 backdrop-blur-xl lg:grid-cols-[230px_minmax(0,1fr)]">
-            <aside class="border-b border-white/70 bg-white/60 p-5 lg:border-b-0 lg:border-r lg:p-6">
+            <aside class="hidden border-b border-white/70 bg-white/60 p-5 lg:block lg:border-b-0 lg:border-r lg:p-6">
                 @include('admin.layout.sidebar')
             </aside>
 
@@ -564,7 +564,52 @@ PHP;
                 </main>
             </section>
         </div>
+
+        <div id="mobile-sidebar-modal" class="fixed inset-0 z-40 hidden lg:hidden" aria-hidden="true">
+            <div id="mobile-sidebar-backdrop" class="absolute inset-0 bg-slate-900/50"></div>
+            <aside class="absolute left-0 top-0 h-full w-[86vw] max-w-[320px] border-r border-white/70 bg-white/95 p-5 shadow-2xl shadow-slate-900/25 backdrop-blur-xl">
+                <div class="mb-4 flex items-center justify-end">
+                    <button id="mobile-sidebar-close" type="button" class="rounded-lg bg-slate-100 px-3 py-1.5 text-xs font-bold text-slate-700 hover:bg-slate-200">Close</button>
+                </div>
+                @include('admin.layout.sidebar')
+            </aside>
+        </div>
     </div>
+
+    <script>
+        (function () {
+            const openBtn = document.getElementById('mobile-menu-toggle');
+            const modal = document.getElementById('mobile-sidebar-modal');
+            const closeBtn = document.getElementById('mobile-sidebar-close');
+            const backdrop = document.getElementById('mobile-sidebar-backdrop');
+
+            if (!openBtn || !modal) {
+                return;
+            }
+
+            function openSidebar() {
+                modal.classList.remove('hidden');
+                modal.classList.add('flex');
+                document.body.classList.add('overflow-hidden');
+            }
+
+            function closeSidebar() {
+                modal.classList.add('hidden');
+                modal.classList.remove('flex');
+                document.body.classList.remove('overflow-hidden');
+            }
+
+            openBtn.addEventListener('click', openSidebar);
+
+            if (closeBtn) {
+                closeBtn.addEventListener('click', closeSidebar);
+            }
+
+            if (backdrop) {
+                backdrop.addEventListener('click', closeSidebar);
+            }
+        })();
+    </script>
 </body>
 </html>
 BLADE;
@@ -623,16 +668,22 @@ BLADE;
     {
         $welcomeColor = $theme['welcomeColor'];
         $avatarGradient = $theme['avatarGradient'];
+        $menuIcon = $useIconLibrary
+            ? '<x-heroicon-o-bars-3 class="h-5 w-5" />'
+            : '≡';
         $searchIcon = $useIconLibrary
             ? '<x-heroicon-o-magnifying-glass class="h-4 w-4" />'
             : '⌕';
         $bellIcon = $useIconLibrary
             ? '<x-heroicon-o-bell class="h-4 w-4" />'
             : '⌁';
+        $logoutIcon = $useIconLibrary
+            ? '<x-heroicon-o-arrow-right-on-rectangle class="h-4 w-4" />'
+            : '⇥';
 
         return <<<BLADE
 <header class="flex flex-wrap items-center justify-between gap-3">
-    <p class="text-sm font-semibold {$welcomeColor}">{$welcome}</p>
+    <p class="text-sm font-semibold {$welcomeColor} hidden sm:block">{$welcome}</p>
 
     <div class="flex items-center gap-2">
         <button class="rounded-xl bg-white/80 p-2 text-slate-600 transition hover:bg-white" type="button" aria-label="Search">
@@ -648,6 +699,25 @@ BLADE;
             <span class="grid h-7 w-7 place-items-center rounded-full bg-gradient-to-br {$avatarGradient} text-xs font-bold text-white">A</span>
             <span class="pr-2 text-xs font-semibold text-slate-700">{$user}</span>
         </div>
+
+        @if (Route::has('logout'))
+            <form method="POST" action="{{ route('logout') }}" class="lg:hidden">
+                @csrf
+                <button class="inline-flex items-center gap-1 rounded-xl bg-white/85 px-2.5 py-2 text-xs font-semibold text-slate-700 shadow-sm shadow-slate-900/5 transition hover:bg-white" type="submit" aria-label="Logout">
+                    <span class="inline-grid h-4 w-4 place-items-center text-sm leading-none">{$logoutIcon}</span>
+                    <span>Logout</span>
+                </button>
+            </form>
+        @else
+            <a href="{{ url('/logout') }}" class="inline-flex items-center gap-1 rounded-xl bg-white/85 px-2.5 py-2 text-xs font-semibold text-slate-700 shadow-sm shadow-slate-900/5 transition hover:bg-white lg:hidden" aria-label="Logout">
+                <span class="inline-grid h-4 w-4 place-items-center text-sm leading-none">{$logoutIcon}</span>
+                <span>Logout</span>
+            </a>
+        @endif
+
+        <button id="mobile-menu-toggle" class="inline-flex rounded-xl bg-white/80 p-2 text-slate-600 transition hover:bg-white lg:hidden" type="button" aria-label="Open menu">
+            <span class="inline-grid h-5 w-5 place-items-center text-sm leading-none">{$menuIcon}</span>
+        </button>
     </div>
 </header>
 BLADE;
@@ -1116,7 +1186,7 @@ BLADE;
                 });
 
                 if (editable.length === 0) {
-                    container.innerHTML = '<p class="text-xs text-slate-500 sm:col-span-2 lg:col-span-4">No editable columns found for this entity.</p>';
+                    container.innerHTML = '<p class="text-xs text-slate-600 sm:col-span-2">No editable columns found for this entity.</p>';
                     return;
                 }
 
@@ -1124,6 +1194,8 @@ BLADE;
                     const col = String(column.name || '');
                     const label = col.replace(/_/g, ' ').replace(/\b\w/g, function (char) { return char.toUpperCase(); });
                     const requiredAttr = column.required ? ' required' : '';
+                    const fullWidth = /description|content|note|notes|address|bio|summary|details/i.test(col);
+                    const wrapperClass = fullWidth ? 'sm:col-span-2' : '';
                     const baseClass = 'rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none ring-cyan-200 focus:ring';
 
                     if (column.is_foreign_key && Array.isArray(column.options) && column.options.length > 0) {
@@ -1133,8 +1205,8 @@ BLADE;
                             })
                         ).join('');
 
-                        return '<div>' +
-                            '<label class="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">' + label + '</label>' +
+                        return '<div class="' + wrapperClass + '">' +
+                            '<label class="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-700">' + label + '</label>' +
                             '<select data-crud-field="' + col + '" class="' + baseClass + '"' + requiredAttr + '>' + optionsHtml + '</select>' +
                         '</div>';
                     }
@@ -1144,8 +1216,8 @@ BLADE;
                         : (column.type === 'integer' || column.type === 'bigint' || column.type === 'decimal' || column.type === 'float' ? 'number' : (column.type === 'date' ? 'date' : (column.type === 'datetime' ? 'datetime-local' : 'text')));
                     const stepAttr = inputType === 'number' ? ' step="any"' : '';
 
-                    return '<div>' +
-                        '<label class="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">' + label + '</label>' +
+                    return '<div class="' + wrapperClass + '">' +
+                        '<label class="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-700">' + label + '</label>' +
                         '<input data-crud-field="' + col + '" type="' + inputType + '" class="' + baseClass + '"' + stepAttr + requiredAttr + '>' +
                     '</div>';
                 }).join('');
@@ -1209,6 +1281,7 @@ BLADE;
                 }
 
                 modal.classList.remove('hidden');
+                modal.style.display = 'flex';
                 document.body.classList.add('overflow-hidden');
             }
 
@@ -1219,6 +1292,7 @@ BLADE;
                 }
 
                 modal.classList.add('hidden');
+                modal.style.display = 'none';
                 document.body.classList.remove('overflow-hidden');
             }
 
@@ -1492,26 +1566,29 @@ HTML;
     </div>
 </article>
 
-<div id="crud-modal" class="fixed inset-0 z-50 hidden bg-slate-900/50 p-4 sm:p-8">
-    <div class="mx-auto mt-6 w-full max-w-4xl rounded-2xl border border-white/70 bg-white p-4 shadow-2xl shadow-slate-900/25 sm:mt-12 sm:p-6">
-        <div class="mb-4 flex items-center justify-between">
-            <h3 id="crud-modal-title" class="text-lg font-black text-slate-800">Create Record</h3>
-            <button id="crud-close-modal" type="button" class="rounded-lg bg-slate-100 px-3 py-1.5 text-xs font-bold text-slate-700 hover:bg-slate-200">Close</button>
+<div id="crud-modal" class="fixed inset-0 z-50 hidden p-4" style="background-color: rgba(15, 23, 42, 0.64);">
+    <div class="flex h-full w-full items-center justify-center">
+        <div class="overflow-hidden rounded-3xl border border-slate-200 bg-white p-5 shadow-2xl shadow-slate-900/30 sm:p-6 flex flex-col" style="width:min(92vw,32rem);height:min(92vw,32rem);max-height:86vh;background-color:rgba(255,255,255,0.98);color:#0f172a;">
+        <div class="mb-3 flex items-center justify-between">
+            <h3 id="crud-modal-title" class="text-base font-black text-slate-800">Create</h3>
+            <button id="crud-close-modal" type="button" class="rounded-lg bg-slate-200 px-2.5 py-1 text-xs font-bold text-slate-700 hover:bg-slate-300 transition">✕</button>
         </div>
 
-        <form id="crud-form" class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-            <div id="crud-dynamic-fields" class="contents">
-                <p class="text-xs text-slate-500 sm:col-span-2 lg:col-span-3">Loading fields from entity schema...</p>
+        <form id="crud-form" class="flex flex-col flex-1 space-y-3">
+            <div class="flex-1 overflow-y-auto pr-1.5">
+                <div id="crud-dynamic-fields" class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                    <p class="text-xs text-slate-700">Loading fields...</p>
+                </div>
             </div>
 
-            <div class="sm:col-span-2 lg:col-span-3 flex flex-wrap gap-2 pt-1">
-                <button type="submit" class="rounded-lg bg-cyan-600 px-4 py-2 text-xs font-bold text-white hover:bg-cyan-700">
-                    <span id="crud-submit-label">Create record</span>
+            <div class="flex flex-wrap items-center gap-2 pt-2 border-t border-slate-200">
+                <button type="submit" class="h-10 flex-1 rounded-lg bg-cyan-600 px-4 text-sm font-bold text-white hover:bg-cyan-700 transition">
+                    <span id="crud-submit-label">Create</span>
                 </button>
-                <button id="crud-reset" type="button" class="rounded-lg bg-slate-100 px-4 py-2 text-xs font-bold text-slate-700 hover:bg-slate-200">Reset</button>
-                <button id="crud-close-modal-secondary" type="button" class="rounded-lg bg-white px-4 py-2 text-xs font-bold text-slate-700 ring-1 ring-slate-200 hover:bg-slate-50">Cancel</button>
+                <button id="crud-close-modal-secondary" type="button" class="h-10 rounded-lg bg-slate-200 px-4 text-sm font-bold text-slate-700 hover:bg-slate-300 transition">Cancel</button>
             </div>
         </form>
+        </div>
     </div>
 </div>
 HTML;
@@ -1909,3 +1986,4 @@ class AdminDashboardCrudController extends Controller
 PHP;
     }
 }
+
