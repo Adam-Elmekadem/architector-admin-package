@@ -103,7 +103,7 @@ class MakeAdmin extends Command
 
     private function createCrudBackend(array $settings): void
     {
-        if (($settings['api'] ?? '') !== '' || ! ($settings['crud'] ?? false)) {
+        if (! ($settings['crud'] ?? false)) {
             return;
         }
 
@@ -140,9 +140,21 @@ class MakeAdmin extends Command
         }
 
         $this->warn('Blade Heroicons not found. Installing blade-ui-kit/blade-heroicons...');
-        $result = Process::path(base_path())
+        $process = Process::path(base_path())
             ->timeout(600)
-            ->run('composer require blade-ui-kit/blade-heroicons --no-interaction');
+            ->start('composer require blade-ui-kit/blade-heroicons --no-interaction');
+
+        $frames = ['|', '/', '-', '\\'];
+        $frame = 0;
+
+        while ($process->running()) {
+            $this->output->write("\rInstalling heroicons {$frames[$frame]} ");
+            usleep(120000);
+            $frame = ($frame + 1) % count($frames);
+        }
+
+        $this->output->writeln("\rInstalling heroicons done.   ");
+        $result = $process->wait();
 
         if ($result->failed()) {
             $this->warn('Icon library install failed. Falling back to built-in glyph icons.');
@@ -263,12 +275,15 @@ PHP;
 
         $routesContent = File::exists($routesFile) ? File::get($routesFile) : '';
 
-        $hasEntityCrudRoutes = str_contains($routesContent, '/admin-dashboard/{entity}/records')
-            && str_contains($routesContent, '/admin-dashboard/{entity}/schema');
+        $hasEntityCrudRoutes = str_contains($routesContent, "AdminDashboardCrudController::class, 'schema'")
+            && str_contains($routesContent, "AdminDashboardCrudController::class, 'index'")
+            && str_contains($routesContent, "AdminDashboardCrudController::class, 'store'")
+            && str_contains($routesContent, "AdminDashboardCrudController::class, 'update'")
+            && str_contains($routesContent, "AdminDashboardCrudController::class, 'destroy'");
 
-        $hasUserAdminActions = str_contains($routesContent, '/admin-dashboard/users/{id}/ban')
-            && str_contains($routesContent, '/admin-dashboard/users/{id}/unban')
-            && str_contains($routesContent, '/admin-dashboard/users/{id}/reset-password');
+        $hasUserAdminActions = str_contains($routesContent, "AdminDashboardCrudController::class, 'banUser'")
+            && str_contains($routesContent, "AdminDashboardCrudController::class, 'unbanUser'")
+            && str_contains($routesContent, "AdminDashboardCrudController::class, 'resetUserPassword'");
 
         if ($hasEntityCrudRoutes && $hasUserAdminActions) {
             $this->warn('CRUD API routes already exist: /api/admin-dashboard/{entity}/records + schema + user actions');
@@ -656,7 +671,7 @@ BLADE;
 
         $apiUrl = json_encode($effectiveApi, JSON_UNESCAPED_SLASHES);
         $token = json_encode($settings['token'], JSON_UNESCAPED_SLASHES);
-        $crudEnabled = ((bool) ($settings['crud'] ?? false)) && (($settings['api'] ?? '') === '');
+        $crudEnabled = (bool) ($settings['crud'] ?? false);
         $crudEnabledJs = $crudEnabled ? 'true' : 'false';
         $crudMarkup = $crudEnabled ? $this->crudPanelMarkup($linkColor) : '';
         $entityNames = $settings['sidebar_items'] ?? [];
@@ -688,15 +703,19 @@ BLADE;
             const configEl = document.getElementById('dashboard-config');
             const configuredEndpoint = configEl ? (configEl.dataset.apiEndpoint || '') : '';
             const configuredToken = configEl ? (configEl.dataset.apiToken || '') : '';
-            const endpoint = configuredEndpoint || defaultEndpoint;
+            const normalizedConfiguredEndpoint = configuredEndpoint.trim();
+            const hasValidConfiguredEndpoint = normalizedConfiguredEndpoint !== '' &&
+                (/^https?:\/\//i.test(normalizedConfiguredEndpoint) || normalizedConfiguredEndpoint.startsWith('/'));
+            const endpoint = hasValidConfiguredEndpoint ? normalizedConfiguredEndpoint : defaultEndpoint;
             const token = configuredToken || defaultToken;
             const crudEnabled = {$crudEnabledJs};
-            const runtimeCrudEnabled = crudEnabled && !configuredEndpoint;
+            const runtimeCrudEnabled = crudEnabled;
             const entitySlugs = {$entitySlugsJs};
             const selectedEntityFromRoute = configEl ? (configEl.dataset.selectedEntity || '') : '';
             const statusEl = document.getElementById('api-status');
             let editId = null;
             let crudSchema = null;
+            let crudRecordsCache = [];
 
             const selectedEntity = (selectedEntityFromRoute && entitySlugs.includes(selectedEntityFromRoute))
                 ? selectedEntityFromRoute
@@ -724,6 +743,39 @@ BLADE;
                 }
 
                 return endpoint.replace(/\/+$/, '') + '/' + selectedEntity + '/records';
+            }
+
+            function apiHeaders(jsonBody = false) {
+                const headers = { 'Accept': 'application/json' };
+                if (jsonBody) {
+                    headers['Content-Type'] = 'application/json';
+                }
+                if (token) {
+                    headers['Authorization'] = 'Bearer ' + token;
+                }
+
+                return headers;
+            }
+
+            function setCrudBusy(isBusy, text) {
+                const loader = document.getElementById('crud-loading-indicator');
+                const loaderText = document.getElementById('crud-loading-text');
+                const openBtn = document.getElementById('crud-open-modal');
+
+                if (loader) {
+                    loader.classList.toggle('hidden', !isBusy);
+                    loader.classList.toggle('inline-flex', isBusy);
+                }
+
+                if (loaderText && text) {
+                    loaderText.textContent = text;
+                }
+
+                if (openBtn) {
+                    openBtn.disabled = isBusy;
+                    openBtn.classList.toggle('opacity-60', isBusy);
+                    openBtn.classList.toggle('cursor-not-allowed', isBusy);
+                }
             }
 
             function setText(id, value) {
@@ -897,7 +949,7 @@ BLADE;
 
                 if (safeRecords.length === 0) {
                     thead.innerHTML = '<th class="px-2 py-1.5">Data</th>';
-                    tbody.innerHTML = '<tr><td class="px-2 py-2 text-xs text-slate-500">No records yet. Add one using the form above.</td></tr>';
+                    tbody.innerHTML = '<tr><td class="px-2 py-2 text-xs text-slate-500">No records yet. Click "New record" to create one.</td></tr>';
                     if (recordCountEl) {
                         recordCountEl.textContent = '0 rows';
                     }
@@ -946,21 +998,8 @@ BLADE;
                         const row = records.find(function (item) {
                             return Number(item.id) === id;
                         }) || {};
-                        const submitLabel = document.getElementById('crud-submit-label');
 
-                        document.querySelectorAll('[data-crud-field]').forEach(function (input) {
-                            const column = input.getAttribute('data-crud-field');
-                            if (!column) {
-                                return;
-                            }
-
-                            const value = row[column];
-                            input.value = value === null || value === undefined ? '' : String(value);
-                        });
-
-                        if (submitLabel) submitLabel.textContent = 'Update record';
-
-                        editId = id;
+                        openCrudModal('edit', row);
                     });
                 });
 
@@ -969,9 +1008,10 @@ BLADE;
                         const id = Number(btn.getAttribute('data-crud-delete'));
 
                         try {
+                            setCrudBusy(true, 'Deleting record...');
                             const response = await fetch(crudRecordsEndpoint() + '/' + id, {
                                 method: 'DELETE',
-                                headers: { 'Accept': 'application/json' },
+                                headers: apiHeaders(),
                             });
 
                             if (!response.ok) {
@@ -986,6 +1026,8 @@ BLADE;
                             if (statusEl) {
                                 statusEl.textContent = 'CRUD error: ' + error.message;
                             }
+                        } finally {
+                            setCrudBusy(false, 'Loading entity schema...');
                         }
                     });
                 });
@@ -1009,7 +1051,7 @@ BLADE;
             }
 
             async function refreshCrud() {
-                const response = await fetch(crudRecordsEndpoint(), { headers: { 'Accept': 'application/json' } });
+                const response = await fetch(crudRecordsEndpoint(), { headers: apiHeaders() });
                 if (!response.ok) {
                     throw new Error('HTTP ' + response.status);
                 }
@@ -1024,7 +1066,7 @@ BLADE;
             }
 
             async function fetchCrudSchema() {
-                const response = await fetch(crudSchemaEndpoint(), { headers: { 'Accept': 'application/json' } });
+                const response = await fetch(crudSchemaEndpoint(), { headers: apiHeaders() });
                 if (!response.ok) {
                     throw new Error('HTTP ' + response.status);
                 }
@@ -1100,6 +1142,61 @@ BLADE;
                 return payload;
             }
 
+            function openCrudModal(mode, row) {
+                const modal = document.getElementById('crud-modal');
+                const title = document.getElementById('crud-modal-title');
+                const submitLabel = document.getElementById('crud-submit-label');
+
+                if (!modal) {
+                    return;
+                }
+
+                if (mode === 'edit') {
+                    editId = Number(row && row.id);
+                    if (title) {
+                        title.textContent = 'Update Record';
+                    }
+                    if (submitLabel) {
+                        submitLabel.textContent = 'Save changes';
+                    }
+
+                    document.querySelectorAll('[data-crud-field]').forEach(function (input) {
+                        const column = input.getAttribute('data-crud-field');
+                        if (!column) {
+                            return;
+                        }
+
+                        const value = row[column];
+                        input.value = value === null || value === undefined ? '' : String(value);
+                    });
+                } else {
+                    editId = null;
+                    if (title) {
+                        title.textContent = 'Create Record';
+                    }
+                    if (submitLabel) {
+                        submitLabel.textContent = 'Create record';
+                    }
+                    const form = document.getElementById('crud-form');
+                    if (form) {
+                        form.reset();
+                    }
+                }
+
+                modal.classList.remove('hidden');
+                document.body.classList.add('overflow-hidden');
+            }
+
+            function closeCrudModal() {
+                const modal = document.getElementById('crud-modal');
+                if (!modal) {
+                    return;
+                }
+
+                modal.classList.add('hidden');
+                document.body.classList.remove('overflow-hidden');
+            }
+
             function initCrudMode() {
                 const panel = document.getElementById('crud-panel');
                 if (!panel) {
@@ -1108,6 +1205,10 @@ BLADE;
                     return;
                 }
 
+                const openBtn = document.getElementById('crud-open-modal');
+                const closeBtn = document.getElementById('crud-close-modal');
+                const closeBtnSecondary = document.getElementById('crud-close-modal-secondary');
+                const modal = document.getElementById('crud-modal');
                 const form = document.getElementById('crud-form');
                 const resetBtn = document.getElementById('crud-reset');
                 const submitLabel = document.getElementById('crud-submit-label');
@@ -1119,8 +1220,30 @@ BLADE;
                     form.reset();
                     editId = null;
                     if (submitLabel) {
-                        submitLabel.textContent = 'Add record';
+                        submitLabel.textContent = 'Create record';
                     }
+                }
+
+                if (openBtn) {
+                    openBtn.addEventListener('click', function () {
+                        openCrudModal('create', {});
+                    });
+                }
+
+                if (closeBtn) {
+                    closeBtn.addEventListener('click', closeCrudModal);
+                }
+
+                if (closeBtnSecondary) {
+                    closeBtnSecondary.addEventListener('click', closeCrudModal);
+                }
+
+                if (modal) {
+                    modal.addEventListener('click', function (event) {
+                        if (event.target === modal) {
+                            closeCrudModal();
+                        }
+                    });
                 }
 
                 if (form) {
@@ -1129,14 +1252,12 @@ BLADE;
                         const payload = collectCrudPayload();
 
                         try {
+                            setCrudBusy(true, 'Saving record...');
                             const method = editId === null ? 'POST' : 'PUT';
                             const target = editId === null ? crudRecordsEndpoint() : (crudRecordsEndpoint() + '/' + editId);
                             const response = await fetch(target, {
                                 method: method,
-                                headers: {
-                                    'Accept': 'application/json',
-                                    'Content-Type': 'application/json',
-                                },
+                                headers: apiHeaders(true),
                                 body: JSON.stringify(payload),
                             });
 
@@ -1146,6 +1267,7 @@ BLADE;
 
                             const records = await refreshCrud();
                             clearForm();
+                            closeCrudModal();
 
                             if (statusEl) {
                                 statusEl.textContent = 'CRUD: record saved (' + records.length + ' records)';
@@ -1154,6 +1276,8 @@ BLADE;
                             if (statusEl) {
                                 statusEl.textContent = 'CRUD error: ' + error.message;
                             }
+                        } finally {
+                            setCrudBusy(false, 'Loading entity schema...');
                         }
                     });
                 }
@@ -1164,6 +1288,8 @@ BLADE;
                     });
                 }
 
+                setCrudBusy(true, 'Loading entity schema...');
+
                 fetchCrudSchema()
                     .then(function (schema) {
                         crudSchema = schema;
@@ -1172,11 +1298,14 @@ BLADE;
                         return refreshCrud();
                     })
                     .then(function (records) {
+                        crudRecordsCache = records;
+                        setCrudBusy(false, 'Loading entity schema...');
                         if (statusEl) {
                             statusEl.textContent = 'CRUD: ' + selectedEntity + ' mode enabled (' + records.length + ' records)';
                         }
                     })
                     .catch(function (error) {
+                        setCrudBusy(false, 'Loading entity schema...');
                         if (statusEl) {
                             statusEl.textContent = 'CRUD error: ' + error.message;
                         }
@@ -1321,24 +1450,45 @@ HTML;
     {
         return <<<HTML
 <article id="crud-panel" class="rounded-2xl border border-white/70 bg-white/85 p-4 shadow-sm shadow-slate-900/5">
-    <div class="mb-3 flex items-center justify-between">
-        <h2 class="text-sm font-bold">Basic CRUD (Local)</h2>
-        <span class="text-xs font-semibold {$linkColor}">No API mode</span>
+    <div class="mb-3 flex items-center justify-between gap-3">
+        <div>
+            <h2 class="text-sm font-bold">Basic CRUD</h2>
+            <p class="text-xs text-slate-500">Create, update and delete from a focused modal form.</p>
+        </div>
+        <span class="text-xs font-semibold {$linkColor}">Entity aware</span>
     </div>
 
-    <form id="crud-form" class="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
-        <div id="crud-dynamic-fields" class="contents">
-            <p class="text-xs text-slate-500 sm:col-span-2 lg:col-span-4">Loading fields from entity schema...</p>
+    <div class="flex items-center gap-2">
+        <button id="crud-open-modal" type="button" class="rounded-lg bg-cyan-600 px-4 py-2 text-xs font-bold text-white hover:bg-cyan-700 transition">New record</button>
+        <div id="crud-loading-indicator" class="hidden items-center gap-2 text-xs font-semibold text-slate-500">
+            <span class="h-3.5 w-3.5 animate-spin rounded-full border-2 border-slate-300 border-t-cyan-600"></span>
+            <span id="crud-loading-text">Loading entity schema...</span>
+        </div>
+    </div>
+</article>
+
+<div id="crud-modal" class="fixed inset-0 z-50 hidden bg-slate-900/50 p-4 sm:p-8">
+    <div class="mx-auto mt-6 w-full max-w-4xl rounded-2xl border border-white/70 bg-white p-4 shadow-2xl shadow-slate-900/25 sm:mt-12 sm:p-6">
+        <div class="mb-4 flex items-center justify-between">
+            <h3 id="crud-modal-title" class="text-lg font-black text-slate-800">Create Record</h3>
+            <button id="crud-close-modal" type="button" class="rounded-lg bg-slate-100 px-3 py-1.5 text-xs font-bold text-slate-700 hover:bg-slate-200">Close</button>
         </div>
 
-        <div class="sm:col-span-2 lg:col-span-4 flex flex-wrap gap-2 pt-1">
-            <button type="submit" class="rounded-lg bg-cyan-600 px-4 py-2 text-xs font-bold text-white hover:bg-cyan-700">
-                <span id="crud-submit-label">Add record</span>
-            </button>
-            <button id="crud-reset" type="button" class="rounded-lg bg-slate-100 px-4 py-2 text-xs font-bold text-slate-700 hover:bg-slate-200">Reset</button>
-        </div>
-    </form>
-</article>
+        <form id="crud-form" class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+            <div id="crud-dynamic-fields" class="contents">
+                <p class="text-xs text-slate-500 sm:col-span-2 lg:col-span-3">Loading fields from entity schema...</p>
+            </div>
+
+            <div class="sm:col-span-2 lg:col-span-3 flex flex-wrap gap-2 pt-1">
+                <button type="submit" class="rounded-lg bg-cyan-600 px-4 py-2 text-xs font-bold text-white hover:bg-cyan-700">
+                    <span id="crud-submit-label">Create record</span>
+                </button>
+                <button id="crud-reset" type="button" class="rounded-lg bg-slate-100 px-4 py-2 text-xs font-bold text-slate-700 hover:bg-slate-200">Reset</button>
+                <button id="crud-close-modal-secondary" type="button" class="rounded-lg bg-white px-4 py-2 text-xs font-bold text-slate-700 ring-1 ring-slate-200 hover:bg-slate-50">Cancel</button>
+            </div>
+        </form>
+    </div>
+</div>
 HTML;
     }
 
