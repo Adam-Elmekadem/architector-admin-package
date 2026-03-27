@@ -135,7 +135,11 @@ class MakeAdmin extends Command
 
     private function ensureHeroiconsInstalled(): bool
     {
+        $this->animateSpinner('Checking Blade Heroicons', 6, 70000);
+
         if (class_exists(self::HEROICONS_PROVIDER)) {
+            $this->info('Blade Heroicons already installed. Skipping download.');
+
             return true;
         }
 
@@ -144,14 +148,7 @@ class MakeAdmin extends Command
             ->timeout(600)
             ->start('composer require blade-ui-kit/blade-heroicons --no-interaction');
 
-        $frames = ['|', '/', '-', '\\'];
-        $frame = 0;
-
-        while ($process->running()) {
-            $this->output->write("\rInstalling heroicons {$frames[$frame]} ");
-            usleep(120000);
-            $frame = ($frame + 1) % count($frames);
-        }
+        $this->spinProcess('Installing heroicons', $process, 8, 100000);
 
         $this->output->writeln("\rInstalling heroicons done.   ");
         $result = $process->wait();
@@ -165,6 +162,34 @@ class MakeAdmin extends Command
         $this->info('Blade Heroicons installed successfully.');
 
         return true;
+    }
+
+    private function animateSpinner(string $label, int $cycles = 6, int $sleepMicroseconds = 80000): void
+    {
+        $frames = ['|', '/', '-', '\\'];
+        $frameIndex = 0;
+
+        for ($i = 0; $i < $cycles; $i++) {
+            $this->output->write("\r{$label} {$frames[$frameIndex]} ");
+            usleep($sleepMicroseconds);
+            $frameIndex = ($frameIndex + 1) % count($frames);
+        }
+
+        $this->output->writeln("\r{$label} done.   ");
+    }
+
+    private function spinProcess(string $label, $process, int $minFrames = 8, int $sleepMicroseconds = 100000): void
+    {
+        $frames = ['|', '/', '-', '\\'];
+        $frameIndex = 0;
+        $shown = 0;
+
+        while ($process->running() || $shown < $minFrames) {
+            $this->output->write("\r{$label} {$frames[$frameIndex]} ");
+            usleep($sleepMicroseconds);
+            $frameIndex = ($frameIndex + 1) % count($frames);
+            $shown++;
+        }
     }
 
     private function resolveSettings(array $defaults): array
