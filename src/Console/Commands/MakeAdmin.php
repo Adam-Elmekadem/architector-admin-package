@@ -599,6 +599,18 @@ PHP;
                 document.body.classList.remove('overflow-hidden');
             }
 
+            function syncMenuButtonVisibility() {
+                const isMobile = window.matchMedia('(max-width: 1023px)').matches;
+                openBtn.style.display = isMobile ? 'inline-flex' : 'none';
+
+                if (!isMobile) {
+                    closeSidebar();
+                }
+            }
+
+            syncMenuButtonVisibility();
+            window.addEventListener('resize', syncMenuButtonVisibility);
+
             openBtn.addEventListener('click', openSidebar);
 
             if (closeBtn) {
@@ -685,7 +697,7 @@ BLADE;
 <header class="flex flex-wrap items-center justify-between gap-3">
     <p class="text-sm font-semibold {$welcomeColor} hidden sm:block">{$welcome}</p>
 
-    <div class="flex items-center gap-2">
+    <div class="ml-auto flex items-center gap-2">
         <button class="rounded-xl bg-white/80 p-2 text-slate-600 transition hover:bg-white" type="button" aria-label="Search">
             <span class="inline-grid h-4 w-4 place-items-center text-sm leading-none">{$searchIcon}</span>
         </button>
@@ -715,7 +727,7 @@ BLADE;
             </a>
         @endif
 
-        <button id="mobile-menu-toggle" class="inline-flex rounded-xl bg-white/80 p-2 text-slate-600 transition hover:bg-white lg:hidden" type="button" aria-label="Open menu">
+        <button id="mobile-menu-toggle" class="hidden rounded-xl bg-white/80 p-2 text-slate-600 transition hover:bg-white" type="button" aria-label="Open menu">
             <span class="inline-grid h-5 w-5 place-items-center text-sm leading-none">{$menuIcon}</span>
         </button>
     </div>
@@ -855,7 +867,13 @@ BLADE;
             function setCrudBusy(isBusy, text) {
                 const loader = document.getElementById('crud-loading-indicator');
                 const loaderText = document.getElementById('crud-loading-text');
+                const modalLoader = document.getElementById('crud-modal-loading');
+                const modalLoaderText = document.getElementById('crud-modal-loading-text');
                 const openBtn = document.getElementById('crud-open-modal');
+                const submitBtn = document.querySelector('#crud-form button[type="submit"]');
+                const closeBtn = document.getElementById('crud-close-modal');
+                const closeBtnSecondary = document.getElementById('crud-close-modal-secondary');
+                const resetBtn = document.getElementById('crud-reset');
 
                 if (loader) {
                     loader.classList.toggle('hidden', !isBusy);
@@ -866,11 +884,29 @@ BLADE;
                     loaderText.textContent = text;
                 }
 
+                if (modalLoader) {
+                    modalLoader.classList.toggle('hidden', !isBusy);
+                    modalLoader.classList.toggle('flex', isBusy);
+                }
+
+                if (modalLoaderText && text) {
+                    modalLoaderText.textContent = text;
+                }
+
                 if (openBtn) {
                     openBtn.disabled = isBusy;
                     openBtn.classList.toggle('opacity-60', isBusy);
                     openBtn.classList.toggle('cursor-not-allowed', isBusy);
                 }
+
+                [submitBtn, closeBtn, closeBtnSecondary, resetBtn].forEach(function (btn) {
+                    if (!btn) {
+                        return;
+                    }
+                    btn.disabled = isBusy;
+                    btn.classList.toggle('opacity-60', isBusy);
+                    btn.classList.toggle('cursor-not-allowed', isBusy);
+                });
             }
 
             function setText(id, value) {
@@ -1190,6 +1226,38 @@ BLADE;
                     return;
                 }
 
+                function escapeAttr(value) {
+                    return String(value)
+                        .replace(/&/g, '&amp;')
+                        .replace(/"/g, '&quot;');
+                }
+
+                function placeholderFromColumn(name, label, type) {
+                    const key = String(name || '').toLowerCase();
+                    const readable = String(label || 'Value');
+
+                    if (type === 'date') {
+                        return 'YYYY-MM-DD';
+                    }
+                    if (type === 'datetime') {
+                        return 'YYYY-MM-DDTHH:MM';
+                    }
+                    if (/email/.test(key)) {
+                        return 'name@example.com';
+                    }
+                    if (/phone|tel|mobile/.test(key)) {
+                        return '+212600000000';
+                    }
+                    if (/code/.test(key)) {
+                        return 'Ex: ' + readable;
+                    }
+                    if (/description|content|note|notes|summary|details|address|bio/.test(key)) {
+                        return 'Write ' + readable.toLowerCase();
+                    }
+
+                    return 'Enter ' + readable.toLowerCase();
+                }
+
                 container.innerHTML = editable.map(function (column) {
                     const col = String(column.name || '');
                     const label = col.replace(/_/g, ' ').replace(/\b\w/g, function (char) { return char.toUpperCase(); });
@@ -1197,6 +1265,8 @@ BLADE;
                     const fullWidth = /description|content|note|notes|address|bio|summary|details/i.test(col);
                     const wrapperClass = fullWidth ? 'sm:col-span-2' : '';
                     const baseClass = 'rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none ring-cyan-200 focus:ring';
+                    const placeholder = placeholderFromColumn(col, label, column.type);
+                    const placeholderAttr = placeholder ? ' placeholder="' + escapeAttr(placeholder) + '"' : '';
 
                     if (column.is_foreign_key && Array.isArray(column.options) && column.options.length > 0) {
                         const optionsHtml = ['<option value="">Select ' + label + '</option>'].concat(
@@ -1218,7 +1288,7 @@ BLADE;
 
                     return '<div class="' + wrapperClass + '">' +
                         '<label class="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-700">' + label + '</label>' +
-                        '<input data-crud-field="' + col + '" type="' + inputType + '" class="' + baseClass + '"' + stepAttr + requiredAttr + '>' +
+                        '<input data-crud-field="' + col + '" type="' + inputType + '" class="' + baseClass + '"' + stepAttr + requiredAttr + placeholderAttr + '>' +
                     '</div>';
                 }).join('');
             }
@@ -1575,6 +1645,10 @@ HTML;
         </div>
 
         <form id="crud-form" class="flex flex-col flex-1 space-y-3">
+            <div id="crud-modal-loading" class="hidden items-center gap-2 rounded-lg bg-cyan-50 px-3 py-2 text-xs font-semibold text-cyan-700">
+                <span class="h-3.5 w-3.5 animate-spin rounded-full border-2 border-cyan-200 border-t-cyan-600"></span>
+                <span id="crud-modal-loading-text">Loading...</span>
+            </div>
             <div class="flex-1 overflow-y-auto pr-1.5">
                 <div id="crud-dynamic-fields" class="grid grid-cols-1 gap-3 sm:grid-cols-2">
                     <p class="text-xs text-slate-700">Loading fields...</p>
