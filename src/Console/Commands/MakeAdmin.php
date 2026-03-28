@@ -552,7 +552,7 @@ PHP;
 <body class="h-screen w-screen bg-linear-to-br {$bodyGradient} text-slate-800">
     <div class="h-screen w-screen p-0">
         <div class="grid h-full w-full rounded-3xl border border-white/70 bg-white/45 shadow-2xl shadow-slate-900/10 backdrop-blur-xl lg:grid-cols-[230px_minmax(0,1fr)]">
-            <aside class="hidden border-b border-white/70 bg-white/60 p-5 lg:block lg:border-b-0 lg:border-r lg:p-6">
+            <aside class="hidden h-full border-b border-white/70 bg-white/60 p-5 lg:block lg:border-b-0 lg:border-r lg:p-6">
                 @include('admin.layout.sidebar')
             </aside>
 
@@ -632,6 +632,9 @@ BLADE;
         $matchPattern = ltrim($routePath, '/');
         $activeItem = $theme['activeItem'];
         $itemsMarkup = '';
+        $logoutIcon = $useIconLibrary
+            ? '<x-heroicon-o-arrow-right-on-rectangle class="h-4 w-4" />'
+            : '⇥';
         $dashboardIcon = $useIconLibrary
             ? '<x-heroicon-o-home class="h-5 w-5" />'
             : '⌂';
@@ -655,7 +658,7 @@ HTML;
         }
 
         return <<<BLADE
-<div class="space-y-6">
+<div class="flex h-full flex-col gap-6">
     <div>
         <p class="text-3xl font-black tracking-tight text-slate-800">{$title}</p>
         <p class="text-xs text-slate-500">Admin workspace</p>
@@ -672,6 +675,23 @@ HTML;
 
 {$itemsMarkup}
     </nav>
+
+    <div class="mt-auto pt-3 border-t border-slate-200/70">
+        @if (Route::has('logout'))
+            <form method="POST" action="{{ route('logout') }}">
+                @csrf
+                <button type="submit" class="w-full inline-flex items-center justify-center gap-2 rounded-xl bg-white/85 px-4 py-2.5 text-sm font-semibold text-slate-700 shadow-sm shadow-slate-900/5 transition hover:bg-white">
+                    <span class="inline-grid h-4 w-4 place-items-center text-sm leading-none">{$logoutIcon}</span>
+                    <span>Logout</span>
+                </button>
+            </form>
+        @else
+            <a href="{{ url('/logout') }}" class="w-full inline-flex items-center justify-center gap-2 rounded-xl bg-white/85 px-4 py-2.5 text-sm font-semibold text-slate-700 shadow-sm shadow-slate-900/5 transition hover:bg-white">
+                <span class="inline-grid h-4 w-4 place-items-center text-sm leading-none">{$logoutIcon}</span>
+                <span>Logout</span>
+            </a>
+        @endif
+    </div>
 </div>
 BLADE;
     }
@@ -689,13 +709,10 @@ BLADE;
         $bellIcon = $useIconLibrary
             ? '<x-heroicon-o-bell class="h-4 w-4" />'
             : '⌁';
-        $logoutIcon = $useIconLibrary
-            ? '<x-heroicon-o-arrow-right-on-rectangle class="h-4 w-4" />'
-            : '⇥';
 
         return <<<BLADE
-<header class="flex flex-wrap items-center justify-between gap-3">
-    <p class="text-sm font-semibold {$welcomeColor} hidden sm:block">{$welcome}</p>
+<header class="w-full flex items-center justify-between gap-3">
+    <p class="text-sm font-semibold {$welcomeColor}">{$welcome}</p>
 
     <div class="ml-auto flex items-center gap-2">
         <button class="rounded-xl bg-white/80 p-2 text-slate-600 transition hover:bg-white" type="button" aria-label="Search">
@@ -711,21 +728,6 @@ BLADE;
             <span class="grid h-7 w-7 place-items-center rounded-full bg-gradient-to-br {$avatarGradient} text-xs font-bold text-white">A</span>
             <span class="pr-2 text-xs font-semibold text-slate-700">{$user}</span>
         </div>
-
-        @if (Route::has('logout'))
-            <form method="POST" action="{{ route('logout') }}" class="lg:hidden">
-                @csrf
-                <button class="inline-flex items-center gap-1 rounded-xl bg-white/85 px-2.5 py-2 text-xs font-semibold text-slate-700 shadow-sm shadow-slate-900/5 transition hover:bg-white" type="submit" aria-label="Logout">
-                    <span class="inline-grid h-4 w-4 place-items-center text-sm leading-none">{$logoutIcon}</span>
-                    <span>Logout</span>
-                </button>
-            </form>
-        @else
-            <a href="{{ url('/logout') }}" class="inline-flex items-center gap-1 rounded-xl bg-white/85 px-2.5 py-2 text-xs font-semibold text-slate-700 shadow-sm shadow-slate-900/5 transition hover:bg-white lg:hidden" aria-label="Logout">
-                <span class="inline-grid h-4 w-4 place-items-center text-sm leading-none">{$logoutIcon}</span>
-                <span>Logout</span>
-            </a>
-        @endif
 
         <button id="mobile-menu-toggle" class="hidden rounded-xl bg-white/80 p-2 text-slate-600 transition hover:bg-white" type="button" aria-label="Open menu">
             <span class="inline-grid h-5 w-5 place-items-center text-sm leading-none">{$menuIcon}</span>
@@ -874,6 +876,7 @@ BLADE;
                 const closeBtn = document.getElementById('crud-close-modal');
                 const closeBtnSecondary = document.getElementById('crud-close-modal-secondary');
                 const resetBtn = document.getElementById('crud-reset');
+                const submitLabel = document.getElementById('crud-submit-label');
 
                 if (loader) {
                     loader.classList.toggle('hidden', !isBusy);
@@ -885,8 +888,8 @@ BLADE;
                 }
 
                 if (modalLoader) {
-                    modalLoader.classList.toggle('hidden', !isBusy);
-                    modalLoader.classList.toggle('flex', isBusy);
+                    modalLoader.classList.add('hidden');
+                    modalLoader.classList.remove('flex');
                 }
 
                 if (modalLoaderText && text) {
@@ -907,6 +910,18 @@ BLADE;
                     btn.classList.toggle('opacity-60', isBusy);
                     btn.classList.toggle('cursor-not-allowed', isBusy);
                 });
+
+                if (submitLabel) {
+                    const defaultLabel = submitLabel.dataset.defaultLabel || submitLabel.textContent || 'Create record';
+                    submitLabel.dataset.defaultLabel = defaultLabel;
+
+                    if (isBusy) {
+                        const busyText = text || 'Saving...';
+                        submitLabel.innerHTML = '<span class="inline-flex items-center gap-2"><svg class="h-4 w-4 shrink-0 text-white" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-dasharray="42 18" opacity="0.9"><animateTransform attributeName="transform" type="rotate" from="0 12 12" to="360 12 12" dur="0.8s" repeatCount="indefinite" /></circle></svg><span>' + busyText + '</span></span>';
+                    } else {
+                        submitLabel.textContent = defaultLabel;
+                    }
+                }
             }
 
             function setText(id, value) {
@@ -1182,6 +1197,15 @@ BLADE;
             }
 
             async function refreshCrud() {
+                const tableHead = document.getElementById('data-columns');
+                const tableBody = document.getElementById('data-rows');
+                if (tableHead) {
+                    tableHead.innerHTML = '<tr><th class="px-2 py-1.5">Data</th></tr>';
+                }
+                if (tableBody) {
+                    tableBody.innerHTML = '<tr><td class="px-2 py-2 text-xs text-slate-500">Loading entity schema...</td></tr>';
+                }
+
                 const response = await fetch(crudRecordsEndpoint(), { headers: apiHeaders() });
                 if (!response.ok) {
                     throw new Error('HTTP ' + response.status);
@@ -1325,6 +1349,7 @@ BLADE;
                     }
                     if (submitLabel) {
                         submitLabel.textContent = 'Save changes';
+                        submitLabel.dataset.defaultLabel = 'Save changes';
                     }
 
                     document.querySelectorAll('[data-crud-field]').forEach(function (input) {
@@ -1343,6 +1368,7 @@ BLADE;
                     }
                     if (submitLabel) {
                         submitLabel.textContent = 'Create record';
+                        submitLabel.dataset.defaultLabel = 'Create record';
                     }
                     const form = document.getElementById('crud-form');
                     if (form) {
@@ -1390,6 +1416,7 @@ BLADE;
                     editId = null;
                     if (submitLabel) {
                         submitLabel.textContent = 'Create record';
+                        submitLabel.dataset.defaultLabel = 'Create record';
                     }
                 }
 
@@ -1421,7 +1448,8 @@ BLADE;
                         const payload = collectCrudPayload();
 
                         try {
-                            setCrudBusy(true, 'Saving record...');
+                            const savingText = editId === null ? 'Creating...' : 'Saving...';
+                            setCrudBusy(true, savingText);
                             const method = editId === null ? 'POST' : 'PUT';
                             const target = editId === null ? crudRecordsEndpoint() : (crudRecordsEndpoint() + '/' + editId);
                             const response = await fetch(target, {
@@ -1629,10 +1657,6 @@ HTML;
 
     <div class="flex items-center gap-2">
         <button id="crud-open-modal" type="button" class="rounded-lg bg-cyan-600 px-4 py-2 text-xs font-bold text-white hover:bg-cyan-700 transition">New record</button>
-        <div id="crud-loading-indicator" class="hidden items-center gap-2 text-xs font-semibold text-slate-500">
-            <span class="h-3.5 w-3.5 animate-spin rounded-full border-2 border-slate-300 border-t-cyan-600"></span>
-            <span id="crud-loading-text">Loading entity schema...</span>
-        </div>
     </div>
 </article>
 
@@ -1646,7 +1670,11 @@ HTML;
 
         <form id="crud-form" class="flex flex-col flex-1 space-y-3">
             <div id="crud-modal-loading" class="hidden items-center gap-2 rounded-lg bg-cyan-50 px-3 py-2 text-xs font-semibold text-cyan-700">
-                <span class="h-3.5 w-3.5 animate-spin rounded-full border-2 border-cyan-200 border-t-cyan-600"></span>
+                <svg class="h-4 w-4 shrink-0 text-cyan-600" viewBox="0 0 24 24" aria-hidden="true">
+                    <circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-dasharray="42 18" opacity="0.9">
+                        <animateTransform attributeName="transform" type="rotate" from="0 12 12" to="360 12 12" dur="0.8s" repeatCount="indefinite" />
+                    </circle>
+                </svg>
                 <span id="crud-modal-loading-text">Loading...</span>
             </div>
             <div class="flex-1 overflow-y-auto pr-1.5">

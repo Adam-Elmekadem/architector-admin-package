@@ -94,6 +94,12 @@ php artisan vendor:publish --provider="Elmekadem\ArchitectorAdmin\Providers\Arch
 Start the interactive setup wizard:
 
 ```bash
+php artisan admine:setup
+```
+
+Legacy alias still works:
+
+```bash
 php artisan admin:setup
 ```
 
@@ -111,10 +117,10 @@ This wizard will:
 
 ```bash
 # Interactive setup (recommended for first time)
-php artisan admin:setup
+php artisan admine:setup
 
 # Non-interactive setup (for CI/CD)
-php artisan admin:setup --no-interaction
+php artisan admine:setup --no-interaction
 ```
 
 ### Generate Dashboard Only
