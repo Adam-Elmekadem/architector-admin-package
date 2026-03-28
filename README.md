@@ -94,12 +94,6 @@ php artisan vendor:publish --provider="Elmekadem\ArchitectorAdmin\Providers\Arch
 Start the interactive setup wizard:
 
 ```bash
-php artisan admine:setup
-```
-
-Legacy alias still works:
-
-```bash
 php artisan admin:setup
 ```
 
@@ -108,8 +102,7 @@ This wizard will:
 1. Create or select an admin user
 2. Generate an API token (Sanctum)
 3. Configure dashboard settings
-4. Generate the admin dashboard UI
-5. Scaffold backend CRUD files per table
+4. Generate React frontend files and dependencies
 
 ## Usage
 
@@ -117,10 +110,10 @@ This wizard will:
 
 ```bash
 # Interactive setup (recommended for first time)
-php artisan admine:setup
+php artisan admin:setup
 
 # Non-interactive setup (for CI/CD)
-php artisan admine:setup --no-interaction
+php artisan admin:setup --no-interaction
 ```
 
 ### Generate Dashboard Only

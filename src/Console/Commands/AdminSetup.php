@@ -10,7 +10,7 @@ use Illuminate\Support\Str;
 
 class AdminSetup extends Command
 {
-    protected $signature = 'admine:setup
+    protected $signature = 'admin:setup
                             {--frontend-path=frontend : Path where React frontend will be generated}
                             {--force : Overwrite generated frontend files if they already exist}
                             {--skip-frontend : Skip frontend generation}';
