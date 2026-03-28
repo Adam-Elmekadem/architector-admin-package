@@ -8,8 +8,6 @@ class ArchitectorServiceProvider extends ServiceProvider
 {
     private const COMMANDS = [
         'Elmekadem\\ArchitectorAdmin\\Console\\Commands\\AdminSetup',
-        'Elmekadem\\ArchitectorAdmin\\Console\\Commands\\MakeAdmin',
-        'Elmekadem\\ArchitectorAdmin\\Console\\Commands\\AdminGenerateEntity',
     ];
 
     /**

@@ -15,8 +15,6 @@ class AdminSetup extends Command
                             {--force : Overwrite generated frontend files if they already exist}
                             {--skip-frontend : Skip frontend generation}';
 
-    protected $aliases = ['admin:setup'];
-
     protected $description = 'Interactive Architector setup (admin account, token, API helpers, and React frontend scaffold)';
 
     public function handle(): int
@@ -182,15 +180,6 @@ class AdminSetup extends Command
             );
         }
 
-        $generateEntityChain = $this->confirm('Generate backend CRUD files per migration table (models/controllers/seeders/routes)?', true);
-        if ($generateEntityChain) {
-            $this->call('admin:generate-entity', [
-                '--all' => true,
-            ]);
-
-            $this->info('Backend chain generated successfully.');
-        }
-
         $this->newLine();
         $this->info('Setup complete');
         $this->line('Admin token (copy now):');
@@ -241,10 +230,6 @@ class AdminSetup extends Command
         $this->writeConfig($configPath, [
             'api_endpoint' => $apiEndpoint,
             'api_token' => $plainTextToken,
-        ]);
-
-        $this->call('admin:generate-entity', [
-            '--all' => true,
         ]);
 
         if (! (bool) $this->option('skip-frontend')) {
