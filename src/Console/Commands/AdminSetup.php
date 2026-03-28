@@ -7,6 +7,7 @@ use Illuminate\Console\Command;
 use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Str;
+use Symfony\Component\Process\Process;
 
 class AdminSetup extends Command
 {
@@ -190,7 +191,6 @@ class AdminSetup extends Command
             $this->line('Frontend path: '.base_path($frontendPath));
             $this->line('Run next:');
             $this->line('  cd '.str_replace('\\', '/', $frontendPath));
-            $this->line('  npm install');
             $this->line('  npm run dev');
         }
 
@@ -523,10 +523,37 @@ PHP;
                         $this->writeGeneratedFile($path, $content, $force);
                 }
 
+                $this->installFrontendDependencies($frontendPath);
+
                 $this->line('Theme mode: '.$settings['theme_mode']);
                 $this->line('CRUD mode: '.(((bool) $settings['crud_enabled']) ? 'enabled' : 'disabled'));
                 $this->line('Frontend API: '.$settings['api_url']);
         }
+
+            private function installFrontendDependencies(string $frontendPath): void
+            {
+                if (! File::exists($frontendPath.'/package.json')) {
+                    return;
+                }
+
+                $npmExecutable = PHP_OS_FAMILY === 'Windows' ? 'npm.cmd' : 'npm';
+                $this->line('Installing frontend dependencies (npm install)...');
+
+                try {
+                    $process = new Process([$npmExecutable, 'install'], $frontendPath);
+                    $process->setTimeout(600);
+                    $process->run();
+
+                    if ($process->isSuccessful()) {
+                        $this->info('Frontend dependencies installed.');
+                        return;
+                    }
+
+                    $this->warn('Automatic npm install failed. Run manually in your frontend directory.');
+                } catch (\Throwable $e) {
+                    $this->warn('Could not run npm install automatically: '.$e->getMessage());
+                }
+            }
 
         private function writeGeneratedFile(string $path, string $content, bool $force): void
         {
@@ -560,7 +587,8 @@ PHP;
         "react-dom": "^18.3.1",
         "react-icons": "^5.3.0",
         "react-redux": "^9.1.2",
-        "react-router-dom": "^6.26.2"
+        "react-router-dom": "^6.26.2",
+        "recharts": "^2.12.7"
     },
     "devDependencies": {
         "@tailwindcss/vite": "^4.1.11",
@@ -637,21 +665,32 @@ JS;
         private function frontendAppJsx(): string
         {
                 return <<<'JSX'
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { Navigate, Route, Routes } from 'react-router-dom';
 import { useDispatch, useSelector } from 'react-redux';
 import {
     FiActivity,
-    FiClock,
+    FiCalendar,
     FiEdit2,
+    FiFileText,
     FiGrid,
-    FiLogOut,
     FiMapPin,
     FiPlus,
     FiSearch,
     FiTrash2,
     FiUsers,
 } from 'react-icons/fi';
+import {
+    Bar,
+    BarChart,
+    Cell,
+    Pie,
+    PieChart,
+    ResponsiveContainer,
+    Tooltip,
+    XAxis,
+    YAxis,
+} from 'recharts';
 import {
     deleteRecord,
     fetchEntities,
@@ -670,331 +709,567 @@ import {
 import LoginPage from './pages/LoginPage';
 import EntitySidebar from './components/EntitySidebar';
 
-function EntityPage({ token, onLogout }) {
+function StatCard({ title, value, icon: Icon }) {
+    return (
+        <article className="rounded-xl border border-slate-800 bg-slate-900/70 px-4 py-3">
+            <span className="inline-flex h-7 w-7 items-center justify-center rounded-md bg-rose-500/15 text-rose-400">
+                <Icon size={14} />
+            </span>
+            <p className="mt-3 text-3xl font-semibold leading-none text-slate-100">{value}</p>
+            <p className="mt-1 text-xs text-slate-400">{title}</p>
+        </article>
+    );
+}
+
+function SmallUser({ user }) {
+    const name = user?.name || 'Unknown User';
+    const email = user?.email || '-';
+    return (
+        <div className="flex items-center gap-3">
+            <span className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-rose-500/15 text-[11px] font-semibold text-rose-300">
+                {String(name).charAt(0).toUpperCase()}
+            </span>
+            <div className="min-w-0">
+                <p className="truncate text-sm font-semibold text-slate-100">{name}</p>
+                <p className="truncate text-xs text-slate-500">{email}</p>
+            </div>
+        </div>
+    );
+}
+
+function EntityPage({ token, currentUser, onLogout }) {
+    const [dashboardTitle, setDashboardTitle] = useState(() => localStorage.getItem('architector_dashboard_title') || 'Architector Admin');
     const [entities, setEntities] = useState([]);
-    const [stats, setStats] = useState([]);
     const [activeView, setActiveView] = useState('dashboard');
-    const [selected, setSelected] = useState('');
+    const [selectedEntity, setSelectedEntity] = useState('');
     const [columns, setColumns] = useState([]);
     const [rows, setRows] = useState([]);
+    const [stats, setStats] = useState([]);
+    const [recentUsers, setRecentUsers] = useState([]);
+    const [recentReservations, setRecentReservations] = useState([]);
+    const [search, setSearch] = useState('');
     const [isLoading, setIsLoading] = useState(false);
     const [isStatsLoading, setIsStatsLoading] = useState(false);
-    const [draft, setDraft] = useState(null);
+    const [isLoggingOut, setIsLoggingOut] = useState(false);
+    const [editingRow, setEditingRow] = useState(null);
     const [saving, setSaving] = useState(false);
-    const [query, setQuery] = useState('');
-
-    const fieldColumns = columns.filter((column) => {
-        const name = String(column?.name || '');
-        return !['id', 'created_at', 'updated_at'].includes(name);
-    });
-
-    const filteredRows = rows.filter((row) => {
-        const term = query.trim().toLowerCase();
-        if (!term) {
-            return true;
-        }
-
-        return Object.values(row).some((value) => String(value ?? '').toLowerCase().includes(term));
-    });
 
     useEffect(() => {
         setApiToken(token);
     }, [token]);
 
     useEffect(() => {
+        document.title = dashboardTitle || 'Architector Admin';
+    }, [dashboardTitle]);
+
+    useEffect(() => {
         fetchEntities()
-            .then((data) => {
-                setEntities(data);
-                if (data.length > 0) {
-                    setSelected((current) => current || data[0]);
+            .then((nextEntities) => {
+                setEntities(nextEntities);
+                if (nextEntities.length > 0) {
+                    setSelectedEntity(nextEntities[0]);
                 }
             })
-            .catch(() => {
-                setEntities([]);
-            });
+            .catch(() => setEntities([]));
     }, []);
 
     useEffect(() => {
-        if (entities.length === 0) {
-            setStats([]);
-            return;
-        }
-
-        setIsStatsLoading(true);
-        Promise.all(
-            entities.slice(0, 6).map(async (entity) => {
-                try {
-                    const list = await fetchRecords(entity);
-                    return {
-                        entity,
-                        count: Array.isArray(list) ? list.length : 0,
-                    };
-                } catch {
-                    return {
-                        entity,
-                        count: 0,
-                    };
-                }
-            })
-        )
-            .then(setStats)
-            .finally(() => setIsStatsLoading(false));
-    }, [entities]);
-
-    useEffect(() => {
-        if (!selected || activeView !== 'entity') {
+        if (!selectedEntity || activeView !== 'entity') {
             setColumns([]);
             setRows([]);
             return;
         }
 
         setIsLoading(true);
-        Promise.all([fetchSchema(selected), fetchRecords(selected)])
+        Promise.all([fetchSchema(selectedEntity), fetchRecords(selectedEntity)])
             .then(([schema, list]) => {
                 setColumns(Array.isArray(schema) ? schema : []);
                 setRows(Array.isArray(list) ? list : []);
             })
             .finally(() => setIsLoading(false));
-    }, [selected, activeView]);
+    }, [selectedEntity, activeView]);
 
-    const onSave = async () => {
-        if (!draft || !selected) {
+    useEffect(() => {
+        if (entities.length === 0) {
+            setStats([]);
+            setRecentUsers([]);
+            setRecentReservations([]);
             return;
         }
 
+        setIsStatsLoading(true);
+
+        Promise.all([
+            Promise.all(
+                entities.slice(0, 8).map(async (entity) => {
+                    try {
+                        const list = await fetchRecords(entity);
+                        return { entity, count: Array.isArray(list) ? list.length : 0 };
+                    } catch {
+                        return { entity, count: 0 };
+                    }
+                })
+            ),
+            (async () => {
+                const usersEntity = entities.find((entity) => String(entity).toLowerCase().includes('user'));
+                if (!usersEntity) return [];
+                try {
+                    const list = await fetchRecords(usersEntity);
+                    return Array.isArray(list) ? list.slice(0, 5) : [];
+                } catch {
+                    return [];
+                }
+            })(),
+            (async () => {
+                const reservationsEntity = entities.find((entity) => {
+                    const normalized = String(entity).toLowerCase();
+                    return normalized.includes('reservation') || normalized.includes('booking');
+                });
+                if (!reservationsEntity) return [];
+                try {
+                    const list = await fetchRecords(reservationsEntity);
+                    return Array.isArray(list) ? list.slice(0, 5) : [];
+                } catch {
+                    return [];
+                }
+            })(),
+        ])
+            .then(([nextStats, users, reservations]) => {
+                setStats(nextStats);
+                setRecentUsers(users);
+                setRecentReservations(reservations);
+            })
+            .finally(() => setIsStatsLoading(false));
+    }, [entities]);
+
+    const dashboardStats = useMemo(() => {
+        const iconFor = (name) => {
+            const lowered = String(name).toLowerCase();
+            if (lowered.includes('hotel')) return FiGrid;
+            if (lowered.includes('restaurant')) return FiActivity;
+            if (lowered.includes('activ')) return FiActivity;
+            if (lowered.includes('city')) return FiMapPin;
+            if (lowered.includes('user')) return FiUsers;
+            if (lowered.includes('reservation') || lowered.includes('booking')) return FiCalendar;
+            if (lowered.includes('blog')) return FiFileText;
+            return FiGrid;
+        };
+
+        return stats.map((item) => ({
+            title: String(item.entity).replace(/_/g, ' '),
+            value: item.count,
+            icon: iconFor(item.entity),
+        }));
+    }, [stats]);
+
+    const filteredRows = useMemo(() => {
+        const term = search.trim().toLowerCase();
+        if (!term) return rows;
+        return rows.filter((row) =>
+            Object.values(row).some((value) => String(value ?? '').toLowerCase().includes(term))
+        );
+    }, [rows, search]);
+
+    const chartBars = useMemo(() => {
+        return stats.slice(0, 16).map((item) => ({
+            name: String(item.entity).replace(/_/g, ' '),
+            value: Number(item.count || 0),
+        }));
+    }, [stats]);
+
+    const pieData = useMemo(() => {
+        return stats.slice(0, 3).map((item) => ({
+            name: String(item.entity),
+            value: Number(item.count || 0),
+        }));
+    }, [stats]);
+
+    const tableColumns = useMemo(() => {
+        if (rows[0]) {
+            return Object.keys(rows[0]);
+        }
+        return columns.map((column) => column.name);
+    }, [rows, columns]);
+
+    const editableColumns = useMemo(() => {
+        return columns.filter((column) => {
+            const name = String(column?.name || '');
+            return !['id', 'created_at', 'updated_at'].includes(name);
+        });
+    }, [columns]);
+
+    const isUsersView = String(selectedEntity).toLowerCase().includes('user');
+
+    const refreshSelectedEntity = async () => {
+        if (!selectedEntity) return;
+        const nextRows = await fetchRecords(selectedEntity);
+        setRows(Array.isArray(nextRows) ? nextRows : []);
+    };
+
+    const handleDelete = async (id) => {
+        await deleteRecord(selectedEntity, id);
+        await refreshSelectedEntity();
+    };
+
+    const handleSaveEdit = async () => {
+        if (!editingRow) return;
         setSaving(true);
         try {
-            await saveRecord(selected, draft.id, draft);
-            setDraft(null);
-            setRows(await fetchRecords(selected));
+            await saveRecord(selectedEntity, editingRow.id, editingRow);
+            setEditingRow(null);
+            await refreshSelectedEntity();
         } finally {
             setSaving(false);
         }
     };
 
-    const onDelete = async (id) => {
-        await deleteRecord(selected, id);
-        setRows(await fetchRecords(selected));
-    };
-
-    const openCreateModal = () => {
-        const nextDraft = {};
-        fieldColumns.forEach((column) => {
-            nextDraft[column.name] = '';
+    const handleOpenCreate = () => {
+        const nextRow = {};
+        editableColumns.forEach((column) => {
+            if (column.name !== 'id') {
+                nextRow[column.name] = '';
+            }
         });
-        setDraft(nextDraft);
+        setEditingRow(nextRow);
     };
 
     const handleLogout = async () => {
+        setIsLoggingOut(true);
         try {
             await logout();
         } catch {
-            // Local logout still proceeds if token is expired.
+            // Keep local logout reliable even if token already expired.
+        } finally {
+            setIsLoggingOut(false);
         }
-
         onLogout();
     };
 
-    const selectDashboard = () => {
-        setActiveView('dashboard');
+    const handleRoleToggle = async (row) => {
+        if (!row?.id) return;
+
+        const roleKey = Object.keys(row).find((key) => String(key).toLowerCase() === 'role');
+        const adminKey = Object.keys(row).find((key) => String(key).toLowerCase() === 'is_admin');
+
+        const nextPayload = { ...row };
+        if (roleKey) {
+            const role = String(row[roleKey] || '').toLowerCase();
+            nextPayload[roleKey] = role === 'admin' ? 'user' : 'admin';
+        } else if (adminKey) {
+            nextPayload[adminKey] = Number(row[adminKey]) === 1 ? 0 : 1;
+        } else {
+            return;
+        }
+
+        await saveRecord(selectedEntity, row.id, nextPayload);
+        await refreshSelectedEntity();
     };
 
-    const selectEntity = (entity) => {
-        setSelected(entity);
-        setActiveView('entity');
-    };
-
-    const iconByEntity = (name) => {
-        const normalized = String(name || '').toLowerCase();
-        if (normalized.includes('user')) return FiUsers;
-        if (normalized.includes('city')) return FiMapPin;
-        if (normalized.includes('activ')) return FiActivity;
-        return FiGrid;
+    const handleDashboardTitleEdit = () => {
+        const nextTitle = window.prompt('Enter dashboard title', dashboardTitle || 'Architector Admin');
+        if (nextTitle === null) return;
+        const sanitized = nextTitle.trim() || 'Architector Admin';
+        setDashboardTitle(sanitized);
+        localStorage.setItem('architector_dashboard_title', sanitized);
     };
 
     return (
-        <div className="min-h-screen bg-[radial-gradient(1200px_500px_at_-10%_-5%,rgba(62,131,255,0.22),transparent_55%),radial-gradient(900px_380px_at_110%_-20%,rgba(225,29,72,0.2),transparent_52%),linear-gradient(180deg,#071322_0%,#050d18_65%)] p-3 text-slate-100 md:p-4">
-            <div className="grid min-h-[calc(100vh-24px)] grid-cols-1 gap-4 lg:grid-cols-[260px_minmax(0,1fr)]">
+        <div className="min-h-screen bg-[#050d1c] p-0 text-slate-100">
+            <div className="grid min-h-screen grid-cols-1 lg:grid-cols-[178px_minmax(0,1fr)]">
                 <EntitySidebar
                     entities={entities}
-                    selectedEntity={selected}
+                    selectedEntity={selectedEntity}
                     activeView={activeView}
-                    onSelectEntity={selectEntity}
-                    onSelectDashboard={selectDashboard}
+                    onSelectDashboard={() => setActiveView('dashboard')}
+                    onSelectEntity={(entity) => {
+                        setSelectedEntity(entity);
+                        setActiveView('entity');
+                    }}
+                    currentUser={{
+                        name: currentUser?.name || 'Admin',
+                        email: currentUser?.email || 'admin@gmail.com',
+                    }}
+                    onLogout={handleLogout}
+                    isLoggingOut={isLoggingOut}
+                    siteUrl="http://localhost:8000"
                 />
-                <main className="min-w-0">
-                    <header className="mb-4 flex flex-col gap-3 rounded-2xl border border-slate-700/60 bg-slate-900/60 p-4 shadow-xl shadow-black/20 md:flex-row md:items-center md:justify-between">
-                        <div>
-                            <p className="m-0 text-[11px] uppercase tracking-[0.14em] text-slate-400">Welcome, Admin</p>
-                            <h2 className="mt-1 text-2xl font-semibold capitalize">
-                                {activeView === 'dashboard' ? 'Dashboard' : selected || 'No entity selected'}
-                            </h2>
-                        </div>
-                        <div className="flex items-center gap-2 self-end md:self-auto">
-                            <button
-                                className="inline-flex items-center gap-2 rounded-lg border border-slate-600 px-3 py-2 text-sm font-medium text-slate-200 transition hover:bg-slate-800"
-                                type="button"
-                                onClick={handleLogout}
-                            >
-                                <FiLogOut /> Logout
-                            </button>
-                            <button
-                                className="inline-flex items-center gap-2 rounded-lg bg-rose-600 px-3 py-2 text-sm font-medium text-white transition hover:bg-rose-500 disabled:cursor-not-allowed disabled:opacity-50"
-                                onClick={openCreateModal}
-                                type="button"
-                                disabled={!selected || activeView !== 'entity'}
-                            >
-                                <FiPlus /> New
-                            </button>
-                        </div>
+
+                <main className="min-w-0 border-l border-slate-800">
+                    <header className="flex h-[62px] items-center justify-end border-b border-slate-800 px-5">
+                        <p className="text-sm text-slate-400">
+                            Welcome, <span className="font-semibold text-rose-500">{currentUser?.name || 'Admin'}</span>
+                        </p>
                     </header>
 
-                    {activeView === 'dashboard' ? (
-                        <>
-                            <section className="mb-4 grid grid-cols-2 gap-3 lg:grid-cols-3 xl:grid-cols-6">
-                                {(isStatsLoading ? Array.from({ length: 6 }).map((_, idx) => ({ entity: `item-${idx}`, count: 0 })) : stats).map((item) => {
-                                    const Icon = iconByEntity(item.entity);
-                                    return (
-                                        <article key={item.entity} className="rounded-xl border border-slate-700/60 bg-slate-900/60 p-4 shadow-lg shadow-black/20">
-                                            <div className="mb-3 inline-flex rounded-lg bg-rose-500/15 p-2 text-rose-400">
-                                                <Icon />
-                                            </div>
-                                            <p className="text-2xl font-semibold">{isStatsLoading ? '-' : item.count}</p>
-                                            <p className="mt-1 text-xs capitalize text-slate-400">{item.entity}</p>
-                                        </article>
-                                    );
-                                })}
-                            </section>
+                    <div className="px-4 py-4 sm:px-6">
+                        {activeView === 'dashboard' ? (
+                            <>
+                                <div className="mb-3">
+                                    <h1
+                                        className="cursor-text text-3xl font-semibold"
+                                        onDoubleClick={handleDashboardTitleEdit}
+                                        title="Double click to edit title"
+                                    >
+                                        {dashboardTitle}
+                                    </h1>
+                                    <p className="mt-1 text-xs text-slate-500">Overview of your platform data</p>
+                                </div>
 
-                            <section className="grid grid-cols-1 gap-4 xl:grid-cols-[2fr_1fr]">
-                                <article className="rounded-2xl border border-slate-700/60 bg-slate-900/60 p-4 shadow-xl shadow-black/20">
-                                    <h3 className="mb-4 text-sm font-semibold">Items per Entity</h3>
-                                    <div className="flex h-52 items-end gap-2">
-                                        {stats.slice(0, 12).map((item, idx) => (
-                                            <div key={item.entity} className="flex flex-1 flex-col items-center gap-2">
-                                                <div
-                                                    className="w-full rounded-t bg-rose-500/90"
-                                                    style={{ height: `${Math.max(18, Math.min(170, item.count * 10 + 18))}px` }}
-                                                />
-                                                <span className="w-full truncate text-center text-[10px] text-slate-400">
-                                                    {idx + 1}
+                                <section className="grid grid-cols-2 gap-3 xl:grid-cols-6">
+                                    {(isStatsLoading ? Array.from({ length: 6 }).map((_, index) => ({ title: `- ${index}`, value: '-', icon: FiGrid })) : dashboardStats.slice(0, 8)).map((card, index) => (
+                                        <StatCard key={`${card.title}-${index}`} title={card.title} value={card.value} icon={card.icon} />
+                                    ))}
+                                </section>
+
+                                <section className="mt-4 grid grid-cols-1 gap-3 xl:grid-cols-[2fr_1fr]">
+                                    <article className="rounded-xl border border-slate-800 bg-slate-900/70 p-4">
+                                        <p className="mb-2 text-sm font-semibold">Items per Entity</p>
+                                        <div className="h-52">
+                                            <ResponsiveContainer width="100%" height="100%">
+                                                <BarChart data={chartBars} margin={{ top: 8, right: 12, left: -18, bottom: 0 }}>
+                                                    <XAxis dataKey="name" tick={{ fill: '#64748b', fontSize: 10 }} axisLine={false} tickLine={false} />
+                                                    <YAxis tick={{ fill: '#64748b', fontSize: 10 }} axisLine={false} tickLine={false} />
+                                                    <Tooltip
+                                                        cursor={{ fill: 'rgba(100, 116, 139, 0.1)' }}
+                                                        contentStyle={{
+                                                            background: '#0f172a',
+                                                            border: '1px solid #1e293b',
+                                                            borderRadius: '10px',
+                                                            color: '#e2e8f0',
+                                                        }}
+                                                    />
+                                                    <Bar dataKey="value" fill="#ff4b55" radius={[3, 3, 0, 0]} maxBarSize={16} />
+                                                </BarChart>
+                                            </ResponsiveContainer>
+                                        </div>
+                                    </article>
+
+                                    <article className="rounded-xl border border-slate-800 bg-slate-900/70 p-4">
+                                        <p className="mb-2 text-sm font-semibold">Distribution</p>
+                                        <div className="h-52">
+                                            <ResponsiveContainer width="100%" height="100%">
+                                                <PieChart>
+                                                    <Pie data={pieData} dataKey="value" nameKey="name" innerRadius={45} outerRadius={75} stroke="#020617" strokeWidth={2}>
+                                                        {pieData.map((_, index) => {
+                                                            const palette = ['#ff4b55', '#ff7a85', '#e03b44'];
+                                                            return <Cell key={`pie-${index}`} fill={palette[index % palette.length]} />;
+                                                        })}
+                                                    </Pie>
+                                                    <Tooltip
+                                                        contentStyle={{
+                                                            background: '#0f172a',
+                                                            border: '1px solid #1e293b',
+                                                            borderRadius: '10px',
+                                                            color: '#e2e8f0',
+                                                        }}
+                                                    />
+                                                </PieChart>
+                                            </ResponsiveContainer>
+                                        </div>
+                                        <div className="mt-1 flex items-center justify-center gap-3 text-[11px] text-slate-400">
+                                            {pieData.map((item, index) => (
+                                                <span key={item.name} className="inline-flex items-center gap-1">
+                                                    <span className={`h-2 w-2 rounded-sm ${index === 0 ? 'bg-[#ff4b55]' : index === 1 ? 'bg-[#ff7a85]' : 'bg-[#e03b44]'}`} />
+                                                    {item.name}
                                                 </span>
-                                            </div>
-                                        ))}
-                                    </div>
-                                </article>
-                                <article className="rounded-2xl border border-slate-700/60 bg-slate-900/60 p-4 shadow-xl shadow-black/20">
-                                    <h3 className="mb-4 text-sm font-semibold">Distribution</h3>
-                                    <div className="mx-auto mt-3 h-44 w-44 rounded-full border-[16px] border-rose-400/90 border-r-rose-600 border-b-rose-500" />
-                                    <p className="mt-4 text-center text-xs text-slate-400">Live entity split preview</p>
-                                </article>
-                            </section>
-                        </>
-                    ) : (
-                        <section className="rounded-2xl border border-slate-700/60 bg-slate-900/60 p-4 shadow-xl shadow-black/20">
-                            <div className="mb-3 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-                                <h3 className="text-xl font-semibold capitalize">{selected}</h3>
-                                <label className="relative block w-full md:w-72">
-                                    <FiSearch className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-                                    <input
-                                        value={query}
-                                        onChange={(event) => setQuery(event.target.value)}
-                                        placeholder="Search..."
-                                        className="w-full rounded-lg border border-slate-700 bg-slate-950 pl-10 pr-3 py-2 text-sm text-slate-100 outline-none transition focus:border-rose-500"
-                                    />
-                                </label>
-                            </div>
-
-                            <div className="overflow-x-auto">
-                                {!selected ? (
-                                    <p className="text-slate-400">Choose an entity from the sidebar to start.</p>
-                                ) : isLoading ? (
-                                    <div className="space-y-2">
-                                        <div className="h-8 animate-pulse rounded bg-slate-800" />
-                                        <div className="h-8 animate-pulse rounded bg-slate-800" />
-                                        <div className="h-8 animate-pulse rounded bg-slate-800" />
-                                        <div className="h-8 animate-pulse rounded bg-slate-800" />
-                                    </div>
-                                ) : (
-                                    <table className="w-full min-w-[860px] border-collapse text-left text-sm">
-                                        <thead>
-                                            <tr>
-                                                {(rows[0] ? Object.keys(rows[0]) : fieldColumns.map((column) => column.name)).map((key) => (
-                                                    <th key={key} className="border-b border-slate-700 px-2 py-3 font-semibold text-slate-100">{key}</th>
-                                                ))}
-                                                <th className="border-b border-slate-700 px-2 py-3 font-semibold text-slate-100">Actions</th>
-                                            </tr>
-                                        </thead>
-                                        <tbody>
-                                            {filteredRows.map((row) => (
-                                                <tr key={row.id ?? JSON.stringify(row)} className="transition hover:bg-slate-800/50">
-                                                    {Object.entries(row).map(([key, value]) => (
-                                                        <td key={key} className="border-b border-slate-800 px-2 py-3 text-slate-200">{String(value ?? '')}</td>
-                                                    ))}
-                                                    <td className="border-b border-slate-800 px-2 py-3">
-                                                        <div className="flex gap-2">
-                                                            <button
-                                                                type="button"
-                                                                className="rounded-md border border-slate-700 p-2 text-slate-200 transition hover:bg-slate-800"
-                                                                onClick={() => setDraft(row)}
-                                                                aria-label="Edit"
-                                                            >
-                                                                <FiEdit2 />
-                                                            </button>
-                                                            <button
-                                                                type="button"
-                                                                className="rounded-md border border-slate-700 p-2 text-slate-200 transition hover:bg-slate-800"
-                                                                onClick={() => onDelete(row.id)}
-                                                                aria-label="Delete"
-                                                            >
-                                                                <FiTrash2 />
-                                                            </button>
-                                                        </div>
-                                                    </td>
-                                                </tr>
                                             ))}
-                                        </tbody>
-                                    </table>
-                                )}
-                            </div>
-                        </section>
-                    )}
+                                        </div>
+                                    </article>
+                                </section>
+
+                                <section className="mt-4 grid grid-cols-1 gap-3 lg:grid-cols-2">
+                                    <article className="rounded-xl border border-slate-800 bg-slate-900/70 p-4">
+                                        <p className="mb-3 text-sm font-semibold">Recent Users</p>
+                                        {recentUsers.length === 0 ? (
+                                            <p className="text-sm text-slate-500">No users yet</p>
+                                        ) : (
+                                            <div className="space-y-3">
+                                                {recentUsers.map((user, index) => (
+                                                    <SmallUser key={user.id || `${user.email}-${index}`} user={user} />
+                                                ))}
+                                            </div>
+                                        )}
+                                    </article>
+
+                                    <article className="rounded-xl border border-slate-800 bg-slate-900/70 p-4">
+                                        <p className="mb-3 text-sm font-semibold">Recent Reservations</p>
+                                        {recentReservations.length === 0 ? (
+                                            <p className="text-sm text-slate-500">No reservations yet</p>
+                                        ) : (
+                                            <div className="space-y-2">
+                                                {recentReservations.map((reservation, index) => (
+                                                    <div key={reservation.id || index} className="rounded-lg border border-slate-800 bg-slate-950/60 px-3 py-2">
+                                                        <p className="truncate text-sm text-slate-200">{reservation.name || reservation.title || `Reservation #${reservation.id}`}</p>
+                                                        <p className="mt-1 text-xs text-slate-500">{reservation.created_at || reservation.date || '-'}</p>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        )}
+                                    </article>
+                                </section>
+
+                                <button className="fixed bottom-4 right-4 inline-flex h-9 w-9 items-center justify-center rounded-full bg-emerald-500 text-white shadow-lg shadow-emerald-900/50" type="button">
+                                    ✣
+                                </button>
+                            </>
+                        ) : (
+                            <section className="rounded-xl border border-slate-800 bg-slate-950/20">
+                                <div className="border-b border-slate-800 px-4 py-3">
+                                    <h1 className="text-3xl font-semibold capitalize">{selectedEntity}</h1>
+                                </div>
+                                <div className="border-b border-slate-800 px-4 py-2">
+                                    <div className="flex items-center justify-between gap-3">
+                                        <label className="relative block w-full max-w-sm">
+                                            <FiSearch className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" />
+                                            <input
+                                                value={search}
+                                                onChange={(event) => setSearch(event.target.value)}
+                                                placeholder="Search..."
+                                                className="h-9 w-full rounded-md border border-slate-700 bg-slate-900 px-9 text-sm text-slate-200 outline-none placeholder:text-slate-500 focus:border-slate-500"
+                                            />
+                                        </label>
+                                        <button
+                                            type="button"
+                                            onClick={handleOpenCreate}
+                                            className="inline-flex h-9 shrink-0 items-center gap-2 rounded-md bg-rose-500 px-3 text-xs font-semibold text-white transition hover:bg-rose-400"
+                                        >
+                                            <FiPlus size={14} /> Add
+                                        </button>
+                                    </div>
+                                </div>
+
+                                <div className="overflow-x-auto">
+                                    {isLoading ? (
+                                        <div className="space-y-2 p-4">
+                                            <div className="h-8 animate-pulse rounded bg-slate-800" />
+                                            <div className="h-8 animate-pulse rounded bg-slate-800" />
+                                            <div className="h-8 animate-pulse rounded bg-slate-800" />
+                                        </div>
+                                    ) : (
+                                        <table className="w-full min-w-[920px] border-collapse text-left text-sm">
+                                            <thead>
+                                                <tr className="bg-slate-900/80">
+                                                    {tableColumns.map((column) => (
+                                                        <th key={column} className="border-b border-slate-800 px-3 py-2 text-[11px] font-semibold uppercase tracking-wide text-slate-400">
+                                                            {column}
+                                                        </th>
+                                                    ))}
+                                                    <th className="border-b border-slate-800 px-3 py-2 text-[11px] font-semibold uppercase tracking-wide text-slate-400">actions</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody>
+                                                {filteredRows.length === 0 && (
+                                                    <tr>
+                                                        <td colSpan={tableColumns.length + 1} className="px-3 py-8 text-center text-sm text-slate-500">
+                                                            Not found
+                                                        </td>
+                                                    </tr>
+                                                )}
+                                                {filteredRows.map((row, rowIndex) => {
+                                                    const roleValue = row.role || (Number(row.is_admin) === 1 ? 'admin' : 'user');
+                                                    const isAdmin = String(roleValue).toLowerCase() === 'admin';
+                                                    return (
+                                                        <tr key={row.id || rowIndex} className="border-b border-slate-900/80 hover:bg-slate-800/40">
+                                                            {tableColumns.map((column) => (
+                                                                <td key={column} className="px-3 py-3 text-slate-200">
+                                                                    {column === 'role' ? (
+                                                                        <span className={`inline-flex rounded-full px-2 py-0.5 text-[10px] ${isAdmin ? 'bg-rose-500/20 text-rose-300' : 'bg-slate-700/70 text-slate-300'}`}>
+                                                                            {String(row[column] || '').trim() || '-'}
+                                                                        </span>
+                                                                    ) : (
+                                                                        String(row[column] ?? '')
+                                                                    )}
+                                                                </td>
+                                                            ))}
+                                                            <td className="px-3 py-3">
+                                                                <div className="flex items-center gap-3">
+                                                                    {isUsersView ? (
+                                                                        <button
+                                                                            type="button"
+                                                                            onClick={() => handleRoleToggle(row)}
+                                                                            className="text-xs font-semibold text-rose-400 hover:text-rose-300"
+                                                                        >
+                                                                            {isAdmin ? 'Revoke' : 'Make Admin'}
+                                                                        </button>
+                                                                    ) : (
+                                                                        <>
+                                                                            <button
+                                                                                type="button"
+                                                                                className="text-slate-300 hover:text-slate-100"
+                                                                                onClick={() => setEditingRow(row)}
+                                                                                aria-label="Edit"
+                                                                            >
+                                                                                <FiEdit2 size={14} />
+                                                                            </button>
+                                                                            <button
+                                                                                type="button"
+                                                                                className="text-rose-400 hover:text-rose-300"
+                                                                                onClick={() => handleDelete(row.id)}
+                                                                                aria-label="Delete"
+                                                                            >
+                                                                                <FiTrash2 size={14} />
+                                                                            </button>
+                                                                        </>
+                                                                    )}
+                                                                </div>
+                                                            </td>
+                                                        </tr>
+                                                    );
+                                                })}
+                                            </tbody>
+                                        </table>
+                                    )}
+                                </div>
+
+                                <button className="fixed bottom-4 right-4 inline-flex h-9 w-9 items-center justify-center rounded-full bg-emerald-500 text-white shadow-lg shadow-emerald-900/50" type="button">
+                                    ✣
+                                </button>
+                            </section>
+                        )}
+                    </div>
                 </main>
             </div>
-            {draft && (
-                <div className="fixed inset-0 z-20 grid place-items-center bg-slate-950/70 p-4 backdrop-blur-[1px]">
-                    <div className="w-full max-w-xl rounded-2xl border border-slate-700 bg-slate-900 p-5 shadow-2xl shadow-black/30">
-                        <h3 className="mb-2 text-xl font-semibold">{draft.id ? 'Edit record' : 'Create record'}</h3>
-                        {(fieldColumns.length > 0 ? fieldColumns : Object.keys(draft).map((name) => ({ name, type: 'string' }))).map((column) => (
-                            column.name !== 'id' && (
-                                <label key={column.name} className="mt-3 block">
-                                    <span className="mb-1 block text-xs uppercase tracking-wide text-slate-400">{column.name}</span>
-                                    <input
-                                        type={String(column.type || '').includes('int') ? 'number' : 'text'}
-                                        placeholder={`Enter ${column.name}`}
-                                        value={draft[column.name] ?? ''}
-                                        className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 outline-none transition focus:border-rose-500"
-                                        onChange={(e) => setDraft((current) => ({ ...current, [column.name]: e.target.value }))}
-                                    />
-                                </label>
-                            )
-                        ))}
-                        {fieldColumns.length === 0 && (
-                            <p className="text-slate-400">Record has no editable fields yet. Add columns and refresh.</p>
-                        )}
-                        <div className="mt-5 flex justify-end gap-2">
+
+            {editingRow && (
+                <div className="fixed inset-0 z-20 grid place-items-center bg-slate-950/70 px-4">
+                    <div className="max-h-[85vh] w-full max-w-xl overflow-y-auto rounded-xl border border-slate-800 bg-slate-900 p-5">
+                        <h3 className="text-lg font-semibold">{editingRow?.id ? 'Edit record' : 'Create record'}</h3>
+                        <div className="mt-3 space-y-3">
+                            {(editableColumns.length > 0
+                                ? editableColumns
+                                : Object.keys(editingRow).map((name) => ({ name, type: 'string' }))
+                            ).map((column) => (
+                                column.name !== 'id' && (
+                                    <label key={column.name} className="block">
+                                        <span className="mb-1 block text-xs uppercase tracking-wide text-slate-500">{column.name}</span>
+                                        <input
+                                            value={editingRow[column.name] ?? ''}
+                                            type={String(column.type || '').includes('int') ? 'number' : 'text'}
+                                            onChange={(event) =>
+                                                setEditingRow((current) => ({
+                                                    ...current,
+                                                    [column.name]: event.target.value,
+                                                }))
+                                            }
+                                            className="h-10 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 text-sm text-slate-100 outline-none focus:border-slate-500"
+                                        />
+                                    </label>
+                                )
+                            ))}
+                        </div>
+                        <div className="mt-4 flex justify-end gap-2">
                             <button
-                                className="rounded-lg border border-slate-600 px-3 py-2 text-sm font-medium text-slate-200 transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
                                 type="button"
-                                onClick={() => setDraft(null)}
+                                onClick={() => setEditingRow(null)}
+                                className="rounded-md border border-slate-700 px-3 py-2 text-sm text-slate-300 hover:bg-slate-800"
                                 disabled={saving}
                             >
                                 Cancel
                             </button>
                             <button
-                                className="rounded-lg bg-rose-600 px-3 py-2 text-sm font-medium text-white transition hover:bg-rose-500 disabled:cursor-not-allowed disabled:opacity-50"
                                 type="button"
-                                onClick={onSave}
+                                onClick={handleSaveEdit}
+                                className="rounded-md bg-rose-500 px-3 py-2 text-sm font-semibold text-white hover:bg-rose-400"
                                 disabled={saving}
                             >
                                 {saving ? 'Saving...' : 'Save'}
@@ -1027,7 +1302,17 @@ export default function App() {
             />
             <Route
                 path="/"
-                element={auth.token ? <EntityPage token={auth.token} onLogout={() => dispatch(clearAuth())} /> : <Navigate to="/login" replace />}
+                element={
+                    auth.token ? (
+                        <EntityPage
+                            token={auth.token}
+                            currentUser={auth.user}
+                            onLogout={() => dispatch(clearAuth())}
+                        />
+                    ) : (
+                        <Navigate to="/login" replace />
+                    )
+                }
             />
             <Route path="*" element={<Navigate to={auth.token ? '/' : '/login'} replace />} />
         </Routes>
@@ -1112,6 +1397,31 @@ JS;
         {
                 return <<<'CSS'
 @import "tailwindcss";
+
+/* Global scrollbar theme aligned with the dashboard palette */
+* {
+    scrollbar-width: thin;
+    scrollbar-color: #ff4b55 #0b1630;
+}
+
+*::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+}
+
+*::-webkit-scrollbar-track {
+    background: #0b1630;
+}
+
+*::-webkit-scrollbar-thumb {
+    background: linear-gradient(180deg, #ff6b75 0%, #ff4b55 100%);
+    border: 2px solid #0b1630;
+    border-radius: 999px;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+    background: linear-gradient(180deg, #ff7b84 0%, #ff5a64 100%);
+}
 CSS;
         }
 
@@ -1180,6 +1490,7 @@ JS;
         {
                 return <<<'JSX'
 import React, { useState } from 'react';
+import { FiLoader } from 'react-icons/fi';
 import { login } from '../api';
 
 export default function LoginPage({ onSuccess }) {
@@ -1234,7 +1545,14 @@ export default function LoginPage({ onSuccess }) {
                     type="submit"
                     disabled={loading}
                 >
-                    {loading ? 'Signing in...' : 'Login'}
+                    {loading ? (
+                        <span className="inline-flex items-center gap-2">
+                            <FiLoader className="animate-spin" />
+                            Signing in...
+                        </span>
+                    ) : (
+                        'Login'
+                    )}
                 </button>
             </form>
         </main>
@@ -1247,54 +1565,86 @@ JSX;
         {
                 return <<<'JSX'
 import React from 'react';
-import { FiGrid, FiLayers } from 'react-icons/fi';
+import { FiArrowLeftCircle, FiGrid, FiLayers, FiLoader, FiLogOut } from 'react-icons/fi';
 
-export default function EntitySidebar({ entities, selectedEntity, activeView, onSelectEntity, onSelectDashboard }) {
+export default function EntitySidebar({
+    entities,
+    selectedEntity,
+    activeView,
+    onSelectEntity,
+    onSelectDashboard,
+    currentUser,
+    onLogout,
+    isLoggingOut,
+    siteUrl,
+}) {
     return (
-        <aside className="flex min-h-[calc(100vh-24px)] flex-col rounded-2xl border border-slate-700/60 bg-slate-900/60 p-4 shadow-xl shadow-black/20 lg:min-h-[calc(100vh-32px)]">
-            <div className="mb-4 border-b border-slate-700 pb-3">
+        <aside className="flex min-h-screen flex-col bg-[#0a162c]">
+            <div className="border-b border-slate-800 px-3 py-4">
                 <div className="flex items-center gap-2">
                     <span className="inline-flex h-7 w-7 items-center justify-center rounded-lg bg-rose-500 text-sm font-bold text-white">O</span>
-                    <p className="m-0 text-lg font-semibold text-slate-100">OhMyGuide</p>
+                    <p className="m-0 text-base font-semibold text-slate-100">OhMyGuide</p>
                 </div>
-                <p className="mt-1 text-[11px] uppercase tracking-[0.12em] text-rose-400">Admin</p>
+                <p className="mt-1 pl-0.5 text-[10px] uppercase tracking-[0.14em] text-rose-500">Admin</p>
             </div>
 
-            <div className="mb-2 grid gap-2">
+            <div className="px-2 py-3">
                 <button
                     type="button"
                     onClick={onSelectDashboard}
                     className={
                         activeView === 'dashboard'
-                            ? 'inline-flex items-center gap-2 rounded-lg bg-rose-500 px-3 py-2 text-left text-sm font-semibold text-white'
-                            : 'inline-flex items-center gap-2 rounded-lg px-3 py-2 text-left text-sm font-medium text-slate-300 transition hover:bg-slate-800'
+                            ? 'inline-flex w-full items-center gap-2 rounded-md bg-rose-500 px-3 py-2 text-left text-xs font-semibold text-white'
+                            : 'inline-flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-xs font-medium text-slate-300 transition hover:bg-slate-800/60'
                     }
                 >
                     <FiGrid /> Dashboard
                 </button>
+                <div className="mt-2 grid gap-0.5">
+                    {entities.map((entity) => (
+                        <button
+                            key={entity}
+                            type="button"
+                            className={
+                                activeView === 'entity' && entity === selectedEntity
+                                    ? 'inline-flex w-full items-center gap-2 rounded-md bg-rose-500 px-3 py-2 text-left text-xs font-semibold text-white'
+                                    : 'inline-flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-xs font-medium text-slate-300 transition hover:bg-slate-800/60'
+                            }
+                            onClick={() => onSelectEntity(entity)}
+                        >
+                            <FiLayers className="text-[11px]" />
+                            {entity}
+                        </button>
+                    ))}
+                </div>
             </div>
 
-            <p className="mb-2 mt-1 text-xs uppercase tracking-[0.1em] text-slate-500">Entities</p>
-            <div className="grid gap-2">
-                {entities.map((entity) => (
+            <div className="mt-auto border-t border-slate-800 px-3 py-3">
+                <div className="mb-2 flex items-center gap-3">
+                    <span className="inline-flex h-9 w-9 items-center justify-center rounded-full bg-rose-500/20 text-sm font-bold text-rose-300">
+                        {String(currentUser?.name || currentUser?.email || 'A').charAt(0).toUpperCase()}
+                    </span>
+                    <div className="min-w-0">
+                        <p className="truncate text-sm font-semibold text-slate-100">{currentUser?.name || 'Admin'}</p>
+                        <p className="truncate text-[11px] text-slate-500">{currentUser?.email || 'admin@gmail.com'}</p>
+                    </div>
+                </div>
+                <div className="grid gap-2">
                     <button
-                        key={entity}
                         type="button"
-                        className={
-                            activeView === 'entity' && entity === selectedEntity
-                                ? 'inline-flex items-center gap-2 rounded-lg bg-rose-500 px-3 py-2 text-left text-sm font-semibold text-white'
-                                : 'inline-flex items-center gap-2 rounded-lg border border-slate-800 bg-slate-950/40 px-3 py-2 text-left text-sm font-semibold text-slate-200 transition hover:bg-slate-800'
-                        }
-                        onClick={() => onSelectEntity(entity)}
+                        onClick={onLogout}
+                        className="inline-flex items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs font-medium text-slate-300 transition hover:bg-slate-800/60 disabled:cursor-not-allowed disabled:opacity-60"
+                        disabled={isLoggingOut}
                     >
-                        <FiLayers className="text-xs" />
-                        {entity}
+                        {isLoggingOut ? <FiLoader className="animate-spin" /> : <FiLogOut />} {isLoggingOut ? 'Logging out...' : 'Logout'}
                     </button>
-                ))}
-            </div>
-
-            <div className="mt-auto border-t border-slate-700 pt-3 text-xs text-slate-400">
-                Dynamic CRUD from migration tables
+                    <a
+                        href={siteUrl || '/'}
+                        className="inline-flex items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs font-medium text-slate-300 transition hover:bg-slate-800/60"
+                    >
+                        <FiArrowLeftCircle /> Back to site
+                    </a>
+                </div>
             </div>
         </aside>
     );
