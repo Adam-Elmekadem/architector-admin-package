@@ -702,7 +702,6 @@ import {
 } from './api';
 import {
     clearAuth,
-    hydrateAuth,
     selectAuth,
     setAuth,
 } from './features/auth/authSlice';
@@ -1287,10 +1286,6 @@ export default function App() {
     const auth = useSelector(selectAuth);
 
     useEffect(() => {
-        dispatch(hydrateAuth());
-    }, [dispatch]);
-
-    useEffect(() => {
         setApiToken(auth.token);
     }, [auth.token]);
 
@@ -1444,8 +1439,6 @@ JS;
                 return <<<'JS'
 import { createSlice } from '@reduxjs/toolkit';
 
-const STORAGE_KEY = 'architector_auth';
-
 const initialState = {
     token: null,
     user: null,
@@ -1458,24 +1451,14 @@ const authSlice = createSlice({
         setAuth(state, action) {
             state.token = action.payload.token;
             state.user = action.payload.user;
-            localStorage.setItem(STORAGE_KEY, JSON.stringify({ token: state.token, user: state.user }));
         },
         clearAuth(state) {
             state.token = null;
             state.user = null;
-            localStorage.removeItem(STORAGE_KEY);
         },
         hydrateAuth(state) {
-            const raw = localStorage.getItem(STORAGE_KEY);
-            if (!raw) return;
-            try {
-                const parsed = JSON.parse(raw);
-                state.token = parsed?.token ?? null;
-                state.user = parsed?.user ?? null;
-            } catch {
-                state.token = null;
-                state.user = null;
-            }
+            state.token = null;
+            state.user = null;
         },
     },
 });
