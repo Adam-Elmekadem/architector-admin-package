@@ -122,6 +122,7 @@ class AdminSetup extends Command
         $plainTextToken = $user->createToken($tokenName)->plainTextToken;
         $this->ensureAuthApiController();
         $this->ensureAuthApiRoutes();
+        $this->ensureCrudBackendScaffold();
 
         $configPath = config_path('admin_dashboard.php');
         $currentConfig = $this->loadConfig($configPath);
@@ -225,6 +226,7 @@ class AdminSetup extends Command
         $plainTextToken = $user->createToken('admin-dashboard')->plainTextToken;
         $this->ensureAuthApiController();
         $this->ensureAuthApiRoutes();
+        $this->ensureCrudBackendScaffold();
 
         $configPath = config_path('admin_dashboard.php');
         $apiEndpoint = 'http://localhost:8000/api/admin-dashboard';
@@ -486,6 +488,722 @@ PHP;
                 }
 
                 File::put($path, $content);
+        }
+
+        private function ensureCrudBackendScaffold(): void
+        {
+                $this->ensureCrudApiController();
+                $this->ensureCrudSupportFiles();
+                $this->ensureCrudApiRoutes();
+        }
+
+        private function ensureCrudApiController(): void
+        {
+                $path = app_path('Http/Controllers/AdminDashboardCrudController.php');
+
+                $this->writeBackendFile($path, $this->crudControllerTemplate());
+        }
+
+        private function ensureCrudSupportFiles(): void
+        {
+                $basePath = app_path('Support/AdminDashboard');
+                File::ensureDirectoryExists($basePath);
+
+                $this->writeBackendFile($basePath.'/FieldResolver.php', $this->fieldResolverTemplate());
+                $this->writeBackendFile($basePath.'/EntityTableResolver.php', $this->entityTableResolverTemplate());
+                $this->writeBackendFile($basePath.'/CrudPayloadBuilder.php', $this->crudPayloadBuilderTemplate());
+        }
+
+        private function ensureCrudApiRoutes(): void
+        {
+                $path = base_path('routes/api.php');
+                if (! File::exists($path)) {
+                        return;
+                }
+
+                $content = File::get($path);
+                if (Str::contains($content, "Route::get('/admin-dashboard/entities'")) {
+                        return;
+                }
+
+                $crudBlock = <<<'PHP'
+Route::middleware(['auth:sanctum', 'admin'])->group(function () {
+        Route::prefix('/admin-dashboard')->group(function () {
+                Route::get('/entities', [\App\Http\Controllers\AdminDashboardCrudController::class, 'entities']);
+                Route::get('/{entity}/schema', [\App\Http\Controllers\AdminDashboardCrudController::class, 'schema']);
+                Route::get('/{entity}/records', [\App\Http\Controllers\AdminDashboardCrudController::class, 'index']);
+                Route::post('/{entity}/records', [\App\Http\Controllers\AdminDashboardCrudController::class, 'store']);
+                Route::put('/{entity}/records/{id}', [\App\Http\Controllers\AdminDashboardCrudController::class, 'update']);
+                Route::delete('/{entity}/records/{id}', [\App\Http\Controllers\AdminDashboardCrudController::class, 'destroy']);
+
+                Route::post('/users/{id}/ban', [\App\Http\Controllers\AdminDashboardCrudController::class, 'banUser']);
+                Route::post('/users/{id}/unban', [\App\Http\Controllers\AdminDashboardCrudController::class, 'unbanUser']);
+                Route::post('/users/{id}/reset-password', [\App\Http\Controllers\AdminDashboardCrudController::class, 'resetUserPassword']);
+        });
+});
+PHP;
+
+                File::put($path, rtrim($content)."\n\n{$crudBlock}\n");
+        }
+
+        private function writeBackendFile(string $path, string $content): void
+        {
+                File::ensureDirectoryExists(dirname($path));
+                File::put($path, rtrim($content).PHP_EOL);
+        }
+
+        private function crudControllerTemplate(): string
+        {
+                return <<<'PHP'
+<?php
+
+namespace App\Http\Controllers;
+
+use App\Support\AdminDashboard\CrudPayloadBuilder;
+use App\Support\AdminDashboard\EntityTableResolver;
+use App\Support\AdminDashboard\FieldResolver;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Schema;
+
+class AdminDashboardCrudController extends Controller
+{
+    public function __construct(
+        private FieldResolver $fieldResolver,
+        private EntityTableResolver $tableResolver,
+        private CrudPayloadBuilder $payloadBuilder,
+    ) {
+    }
+
+    public function entities()
+    {
+        return response()->json([
+            'entities' => $this->tableResolver->migrationTables(),
+        ]);
+    }
+
+    public function schema(string $entity)
+    {
+        $table = $this->tableResolver->resolveTable($entity);
+
+        if ($table === null) {
+            return response()->json(['message' => 'Entity table not found'], 404);
+        }
+
+        $metadata = $this->tableResolver->columnMetadata($table);
+
+        $columns = array_map(function ($column) use ($table, $metadata) {
+            $relatedTable = $this->tableResolver->relatedTableFromForeignKey($column);
+            $isForeignKey = $relatedTable !== null;
+            $columnMeta = $metadata[$column] ?? [];
+            $required = array_key_exists('nullable', $columnMeta)
+                ? ! (bool) $columnMeta['nullable']
+                : ! in_array($column, ['created_at', 'updated_at', 'deleted_at'], true);
+            $columnType = $this->tableResolver->columnType($table, $column);
+            $fieldConfig = $this->fieldResolver->resolve(
+                $column,
+                $columnType,
+                $columnMeta,
+                $isForeignKey,
+                $isForeignKey ? $this->tableResolver->foreignKeyOptions($relatedTable) : []
+            );
+
+            return [
+                'name' => $column,
+                'type' => $columnType,
+                'required' => $required,
+                'is_foreign_key' => $isForeignKey,
+                'related_table' => $relatedTable,
+                'options' => $fieldConfig['options'],
+                'input_type' => $fieldConfig['input_type'],
+                'placeholder' => $fieldConfig['placeholder'],
+            ];
+        }, Schema::getColumnListing($table));
+
+        return response()->json([
+            'entity' => $entity,
+            'table' => $table,
+            'columns' => $columns,
+        ]);
+    }
+
+    public function index(string $entity)
+    {
+        $table = $this->tableResolver->resolveTable($entity);
+
+        if ($table === null) {
+            return response()->json(['message' => 'Entity table not found'], 404);
+        }
+
+        $query = DB::table($table);
+        $columns = Schema::getColumnListing($table);
+
+        if (in_array('id', $columns, true)) {
+            $query->orderByDesc('id');
+        }
+
+        return response()->json($query->limit(100)->get());
+    }
+
+    public function store(Request $request, string $entity)
+    {
+        $table = $this->tableResolver->resolveTable($entity);
+
+        if ($table === null) {
+            return response()->json(['message' => 'Entity table not found'], 404);
+        }
+
+        $payload = $this->payloadBuilder->payloadForTable($request, $table);
+        if ($payload === []) {
+            return response()->json([
+                'message' => 'No valid columns in payload for this entity',
+                'allowed' => $this->payloadBuilder->editableColumns($table),
+            ], 422);
+        }
+
+        $foreignKeyError = $this->payloadBuilder->validateForeignKeys($payload);
+        if ($foreignKeyError !== null) {
+            return response()->json(['message' => $foreignKeyError], 422);
+        }
+
+        $id = DB::table($table)->insertGetId($payload);
+        $record = DB::table($table)->where('id', $id)->first();
+
+        return response()->json($record, 201);
+    }
+
+    public function update(Request $request, string $entity, int $id)
+    {
+        $table = $this->tableResolver->resolveTable($entity);
+
+        if ($table === null) {
+            return response()->json(['message' => 'Entity table not found'], 404);
+        }
+
+        if (! Schema::hasColumn($table, 'id')) {
+            return response()->json(['message' => 'Entity does not support ID-based updates'], 422);
+        }
+
+        $payload = $this->payloadBuilder->payloadForTable($request, $table);
+        if ($payload === []) {
+            return response()->json([
+                'message' => 'No valid columns in payload for this entity',
+                'allowed' => $this->payloadBuilder->editableColumns($table),
+            ], 422);
+        }
+
+        $foreignKeyError = $this->payloadBuilder->validateForeignKeys($payload);
+        if ($foreignKeyError !== null) {
+            return response()->json(['message' => $foreignKeyError], 422);
+        }
+
+        $exists = DB::table($table)->where('id', $id)->exists();
+        if (! $exists) {
+            return response()->json(['message' => 'Record not found'], 404);
+        }
+
+        DB::table($table)->where('id', $id)->update($payload);
+
+        return response()->json(DB::table($table)->where('id', $id)->first());
+    }
+
+    public function destroy(string $entity, int $id)
+    {
+        $table = $this->tableResolver->resolveTable($entity);
+
+        if ($table === null) {
+            return response()->json(['message' => 'Entity table not found'], 404);
+        }
+
+        if (! Schema::hasColumn($table, 'id')) {
+            return response()->json(['message' => 'Entity does not support ID-based deletes'], 422);
+        }
+
+        $deleted = DB::table($table)->where('id', $id)->delete();
+        if ($deleted === 0) {
+            return response()->json(['message' => 'Record not found'], 404);
+        }
+
+        return response()->json(['success' => true]);
+    }
+
+    public function banUser(int $id)
+    {
+        $user = DB::table('users')->where('id', $id)->first();
+
+        if (! $user) {
+            return response()->json(['message' => 'User not found'], 404);
+        }
+
+        DB::table('users')->where('id', $id)->update(['banned_at' => now()]);
+
+        return response()->json(['success' => true, 'message' => 'User banned']);
+    }
+
+    public function unbanUser(int $id)
+    {
+        $user = DB::table('users')->where('id', $id)->first();
+
+        if (! $user) {
+            return response()->json(['message' => 'User not found'], 404);
+        }
+
+        DB::table('users')->where('id', $id)->update(['banned_at' => null]);
+
+        return response()->json(['success' => true, 'message' => 'User unbanned']);
+    }
+
+    public function resetUserPassword(int $id)
+    {
+        $user = DB::table('users')->where('id', $id)->first();
+
+        if (! $user) {
+            return response()->json(['message' => 'User not found'], 404);
+        }
+
+        $tempPassword = 'TempPass!' . str_pad((string) rand(1000, 9999), 4, '0', STR_PAD_LEFT);
+        DB::table('users')->where('id', $id)->update(['password' => Hash::make($tempPassword)]);
+
+        return response()->json(['success' => true, 'message' => 'Password reset', 'temp_password' => $tempPassword]);
+    }
+}
+PHP;
+        }
+
+        private function entityTableResolverTemplate(): string
+        {
+                return <<<'PHP'
+<?php
+
+namespace App\Support\AdminDashboard;
+
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\File;
+use Illuminate\Support\Facades\Schema;
+use Illuminate\Support\Str;
+
+class EntityTableResolver
+{
+    /** @var string[] */
+    private array $systemTables = [
+        'cache',
+        'cache_locks',
+        'jobs',
+        'job_batches',
+        'failed_jobs',
+        'sessions',
+        'password_reset_tokens',
+        'personal_access_tokens',
+        'migrations',
+    ];
+
+    public function resolveTable(string $entity): ?string
+    {
+        $table = preg_replace('/[^a-z0-9_]+/i', '', strtolower(trim($entity)));
+
+        if ($table === null || $table === '') {
+            return null;
+        }
+
+        if (! Schema::hasTable($table)) {
+            return null;
+        }
+
+        if (in_array($table, $this->systemTables, true)) {
+            return null;
+        }
+
+        return $table;
+    }
+
+    public function relatedTableFromForeignKey(string $column): ?string
+    {
+        if (! Str::endsWith($column, '_id')) {
+            return null;
+        }
+
+        $base = Str::beforeLast($column, '_id');
+        $table = Str::plural($base);
+
+        if (! Schema::hasTable($table) || ! Schema::hasColumn($table, 'id')) {
+            return null;
+        }
+
+        return $table;
+    }
+
+    public function foreignKeyOptions(string $table): array
+    {
+        $labelColumn = collect(['name', 'title', 'full_name', 'code', 'email'])
+            ->first(function ($candidate) use ($table) {
+                return Schema::hasColumn($table, $candidate);
+            });
+
+        if (! $labelColumn) {
+            $labelColumn = collect(Schema::getColumnListing($table))
+                ->first(function ($candidate) {
+                    $normalized = strtolower((string) $candidate);
+
+                    return ! in_array($normalized, ['id', 'created_at', 'updated_at', 'deleted_at'], true)
+                        && ! str_ends_with($normalized, '_id');
+                });
+        }
+
+        if (! $labelColumn) {
+            $labelColumn = 'id';
+        }
+
+        return DB::table($table)
+            ->select(['id', $labelColumn])
+            ->limit(200)
+            ->get()
+            ->map(function ($row) use ($labelColumn) {
+                $rawLabel = $row->{$labelColumn} ?? null;
+                $label = trim((string) ($rawLabel ?? ''));
+                if ($label === '' || strtolower($label) === 'null') {
+                    $label = 'Unnamed option';
+                }
+
+                return [
+                    'value' => (string) $row->id,
+                    'label' => $label,
+                ];
+            })
+            ->values()
+            ->all();
+    }
+
+    public function columnType(string $table, string $column): string
+    {
+        try {
+            return (string) Schema::getColumnType($table, $column);
+        } catch (\Throwable $e) {
+            return 'string';
+        }
+    }
+
+    public function columnMetadata(string $table): array
+    {
+        try {
+            $connection = DB::connection();
+            if ($connection->getDriverName() !== 'mysql') {
+                return [];
+            }
+
+            $database = $connection->getDatabaseName();
+            $rows = DB::select(
+                'SELECT COLUMN_NAME, IS_NULLABLE, COLUMN_COMMENT FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?',
+                [$database, $table]
+            );
+
+            $result = [];
+            foreach ($rows as $row) {
+                $name = (string) ($row->COLUMN_NAME ?? '');
+                if ($name === '') {
+                    continue;
+                }
+
+                $result[$name] = [
+                    'nullable' => strtoupper((string) ($row->IS_NULLABLE ?? 'NO')) === 'YES',
+                    'comment' => (string) ($row->COLUMN_COMMENT ?? ''),
+                ];
+            }
+
+            return $result;
+        } catch (\Throwable $e) {
+            return [];
+        }
+    }
+
+    public function migrationTables(): array
+    {
+        $tables = [];
+        $migrationFiles = File::glob(database_path('migrations/*.php')) ?: [];
+
+        foreach ($migrationFiles as $file) {
+            $filename = strtolower((string) basename($file));
+
+            if (preg_match('/create_(.+?)_table/', $filename, $match)) {
+                $tables[] = $match[1];
+                continue;
+            }
+
+            $contents = File::get($file);
+            if (preg_match('/Schema::create\(\s*[\'\"]([^\'\"]+)[\'\"]/', $contents, $match)) {
+                $tables[] = strtolower(trim((string) $match[1]));
+            }
+        }
+
+        $tables = array_values(array_unique(array_filter($tables)));
+        $tables = array_values(array_filter($tables, fn ($table) => ! in_array($table, $this->systemTables, true)));
+        sort($tables);
+
+        return $tables;
+    }
+}
+PHP;
+        }
+
+        private function fieldResolverTemplate(): string
+        {
+                return <<<'PHP'
+<?php
+
+namespace App\Support\AdminDashboard;
+
+class FieldResolver
+{
+    public function resolve(
+        string $column,
+        string $columnType,
+        array $columnMeta,
+        bool $isForeignKey,
+        array $foreignKeyOptions = []
+    ): array {
+        $hint = $this->parseInputHint((string) ($columnMeta['comment'] ?? ''));
+        $inputType = $isForeignKey
+            ? 'select'
+            : ($hint['type'] ?? $this->inferInputType($column, $columnType));
+
+        $options = $isForeignKey
+            ? $foreignKeyOptions
+            : ($hint['options'] ?? []);
+
+        return [
+            'input_type' => $inputType,
+            'options' => $options,
+            'placeholder' => $this->placeholderFor($column, $columnType, $inputType),
+        ];
+    }
+
+    private function parseInputHint(string $comment): array
+    {
+        $raw = trim($comment);
+        if ($raw === '') {
+            return [];
+        }
+
+        $normalized = strtolower($raw);
+
+        if (str_starts_with($normalized, 'radio:')) {
+            return [
+                'type' => 'radio',
+                'options' => $this->normalizeSimpleOptions(substr($raw, 6)),
+            ];
+        }
+
+        if (str_starts_with($normalized, 'select:')) {
+            return [
+                'type' => 'select',
+                'options' => $this->normalizeSimpleOptions(substr($raw, 7)),
+            ];
+        }
+
+        if (str_starts_with($normalized, 'checkbox:')) {
+            return [
+                'type' => 'checkboxes',
+                'options' => $this->normalizeSimpleOptions(substr($raw, 9)),
+            ];
+        }
+
+        if (str_starts_with($normalized, 'checkboxes:')) {
+            return [
+                'type' => 'checkboxes',
+                'options' => $this->normalizeSimpleOptions(substr($raw, 11)),
+            ];
+        }
+
+        if (in_array($normalized, ['date', 'datetime', 'datetime-local', 'textarea', 'text'], true)) {
+            return ['type' => $normalized];
+        }
+
+        return [];
+    }
+
+    private function normalizeSimpleOptions(string $csv): array
+    {
+        $parts = array_values(array_filter(array_map('trim', explode(',', $csv)), function ($value) {
+            return $value !== '';
+        }));
+
+        return array_map(function ($value) {
+            return [
+                'value' => $value,
+                'label' => ucwords(str_replace('_', ' ', strtolower($value))),
+            ];
+        }, $parts);
+    }
+
+    private function inferInputType(string $column, string $columnType): string
+    {
+        $name = strtolower(trim($column));
+        $type = strtolower(trim($columnType));
+
+        if (str_contains($type, 'date') && ! str_contains($type, 'time')) {
+            return 'date';
+        }
+
+        if (str_contains($type, 'time') || str_contains($type, 'timestamp') || str_contains($type, 'datetime')) {
+            return 'datetime-local';
+        }
+
+        if (in_array($type, ['integer', 'bigint', 'smallint', 'decimal', 'float', 'double'], true)) {
+            return 'number';
+        }
+
+        if (in_array($type, ['boolean', 'bool'], true) || str_starts_with($name, 'is_') || str_starts_with($name, 'has_')) {
+            return 'checkbox';
+        }
+
+        if ($name === 'gender') {
+            return 'radio';
+        }
+
+        if (str_contains($name, 'skills') || str_contains($name, 'tags')) {
+            return 'checkboxes';
+        }
+
+        if (str_contains($name, 'description') || str_contains($name, 'bio') || str_contains($name, 'notes')) {
+            return 'textarea';
+        }
+
+        if (str_contains($name, 'email')) {
+            return 'email';
+        }
+
+        if (str_contains($name, 'phone') || str_contains($name, 'mobile')) {
+            return 'tel';
+        }
+
+        if (str_contains($name, 'password')) {
+            return 'password';
+        }
+
+        return 'text';
+    }
+
+    private function placeholderFor(string $column, string $columnType, string $inputType): string
+    {
+        $label = ucwords(str_replace('_', ' ', strtolower(trim($column))));
+
+        if ($inputType === 'select') {
+            return 'Select '.$label;
+        }
+
+        if ($inputType === 'radio' || $inputType === 'checkboxes') {
+            return 'Choose '.$label;
+        }
+
+        if ($inputType === 'date') {
+            return 'Pick '.$label;
+        }
+
+        if ($inputType === 'datetime-local') {
+            return 'Pick '.$label.' date and time';
+        }
+
+        if ($inputType === 'textarea') {
+            return 'Enter '.$label;
+        }
+
+        if ($inputType === 'number') {
+            return 'Enter '.$label;
+        }
+
+        if ($inputType === 'email') {
+            return 'example@domain.com';
+        }
+
+        if ($inputType === 'tel') {
+            return 'Enter '.$label;
+        }
+
+        if ($inputType === 'password') {
+            return 'Enter '.$label;
+        }
+
+        if (str_contains(strtolower($columnType), 'text')) {
+            return 'Enter '.$label;
+        }
+
+        return 'Enter '.$label;
+    }
+}
+PHP;
+        }
+
+        private function crudPayloadBuilderTemplate(): string
+        {
+                return <<<'PHP'
+<?php
+
+namespace App\Support\AdminDashboard;
+
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Schema;
+
+class CrudPayloadBuilder
+{
+    public function __construct(private EntityTableResolver $tableResolver)
+    {
+    }
+
+    /** @return string[] */
+    public function editableColumns(string $table): array
+    {
+        $columns = Schema::getColumnListing($table);
+
+        return array_values(array_filter($columns, function ($column) {
+            return ! in_array($column, ['id', 'created_at', 'updated_at', 'deleted_at'], true);
+        }));
+    }
+
+    public function payloadForTable(Request $request, string $table): array
+    {
+        $allowed = $this->editableColumns($table);
+        $data = [];
+        $input = $request->all();
+
+        foreach ($allowed as $column) {
+            if (array_key_exists($column, $input)) {
+                $data[$column] = $input[$column];
+            }
+        }
+
+        $now = now();
+        if (Schema::hasColumn($table, 'created_at') && ! array_key_exists('created_at', $data)) {
+            $data['created_at'] = $now;
+        }
+        if (Schema::hasColumn($table, 'updated_at')) {
+            $data['updated_at'] = $now;
+        }
+
+        return $data;
+    }
+
+    public function validateForeignKeys(array $payload): ?string
+    {
+        foreach ($payload as $column => $value) {
+            $relatedTable = $this->tableResolver->relatedTableFromForeignKey((string) $column);
+            if ($relatedTable === null || $value === null || $value === '') {
+                continue;
+            }
+
+            if (! is_numeric($value)) {
+                return "Invalid foreign key value for {$column}.";
+            }
+
+            $exists = \Illuminate\Support\Facades\DB::table($relatedTable)->where('id', (int) $value)->exists();
+            if (! $exists) {
+                return "Foreign key {$column} references missing record in {$relatedTable}.";
+            }
+        }
+
+        return null;
+    }
+}
+PHP;
         }
 
         private function generateReactFrontend(string $relativePath, array $settings, bool $force): void
