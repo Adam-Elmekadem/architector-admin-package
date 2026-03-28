@@ -128,6 +128,7 @@ class AdminSetup extends Command
         $defaultApi = $currentConfig['api_endpoint'] !== ''
             ? $currentConfig['api_endpoint']
             : 'http://localhost:8000/api/admin-dashboard';
+        $defaultFrontendApi = $this->frontendApiBaseFromDashboardEndpoint($defaultApi);
 
         $api = $defaultApi;
         $saveConfig = $this->confirm('Save API endpoint and token to dashboard config?', true);
@@ -161,9 +162,9 @@ class AdminSetup extends Command
                 $frontendPath = 'frontend';
             }
 
-            $frontendApi = trim((string) $this->ask('Frontend API base URL', $api));
+            $frontendApi = trim((string) $this->ask('Frontend API base URL', $defaultFrontendApi));
             if ($frontendApi === '') {
-                $frontendApi = $api;
+                $frontendApi = $defaultFrontendApi;
             }
 
             $this->generateReactFrontend(
@@ -227,6 +228,7 @@ class AdminSetup extends Command
 
         $configPath = config_path('admin_dashboard.php');
         $apiEndpoint = 'http://localhost:8000/api/admin-dashboard';
+        $frontendApiBase = $this->frontendApiBaseFromDashboardEndpoint($apiEndpoint);
         $this->writeConfig($configPath, [
             'api_endpoint' => $apiEndpoint,
             'api_token' => $plainTextToken,
@@ -236,7 +238,7 @@ class AdminSetup extends Command
             $this->generateReactFrontend(
                 (string) $this->option('frontend-path'),
                 [
-                    'api_url' => $apiEndpoint,
+                    'api_url' => $frontendApiBase,
                     'theme_mode' => 'dark',
                     'crud_enabled' => true,
                     'admin_name' => $name,
@@ -312,6 +314,23 @@ class AdminSetup extends Command
             ."];\n";
 
         File::put($path, $content);
+    }
+
+    private function frontendApiBaseFromDashboardEndpoint(string $dashboardApiEndpoint): string
+    {
+        $normalized = rtrim(trim($dashboardApiEndpoint), '/');
+
+        if ($normalized === '') {
+            return 'http://localhost:8000/api';
+        }
+
+        $withoutDashboardPrefix = preg_replace('#/admin-dashboard$#', '', $normalized);
+
+        if (is_string($withoutDashboardPrefix) && $withoutDashboardPrefix !== '') {
+            return $withoutDashboardPrefix;
+        }
+
+        return 'http://localhost:8000/api';
     }
 
     private function ensureApiRoutesFile(): void
@@ -621,11 +640,24 @@ JS;
 import React, { useEffect, useState } from 'react';
 import { Navigate, Route, Routes } from 'react-router-dom';
 import { useDispatch, useSelector } from 'react-redux';
-import { FiEdit2, FiPlus, FiTrash2 } from 'react-icons/fi';
+import {
+    FiActivity,
+    FiClock,
+    FiEdit2,
+    FiGrid,
+    FiLogOut,
+    FiMapPin,
+    FiPlus,
+    FiSearch,
+    FiTrash2,
+    FiUsers,
+} from 'react-icons/fi';
 import {
     deleteRecord,
     fetchEntities,
     fetchRecords,
+    fetchSchema,
+    logout,
     saveRecord,
     setApiToken,
 } from './api';
@@ -638,16 +670,32 @@ import {
 import LoginPage from './pages/LoginPage';
 import EntitySidebar from './components/EntitySidebar';
 
-function DashboardPage() {
-    return <div className="panel">Select an entity from the sidebar.</div>;
-}
-
-function EntityPage({ token }) {
+function EntityPage({ token, onLogout }) {
     const [entities, setEntities] = useState([]);
+    const [stats, setStats] = useState([]);
+    const [activeView, setActiveView] = useState('dashboard');
     const [selected, setSelected] = useState('');
+    const [columns, setColumns] = useState([]);
     const [rows, setRows] = useState([]);
     const [isLoading, setIsLoading] = useState(false);
+    const [isStatsLoading, setIsStatsLoading] = useState(false);
     const [draft, setDraft] = useState(null);
+    const [saving, setSaving] = useState(false);
+    const [query, setQuery] = useState('');
+
+    const fieldColumns = columns.filter((column) => {
+        const name = String(column?.name || '');
+        return !['id', 'created_at', 'updated_at'].includes(name);
+    });
+
+    const filteredRows = rows.filter((row) => {
+        const term = query.trim().toLowerCase();
+        if (!term) {
+            return true;
+        }
+
+        return Object.values(row).some((value) => String(value ?? '').toLowerCase().includes(term));
+    });
 
     useEffect(() => {
         setApiToken(token);
@@ -667,21 +715,61 @@ function EntityPage({ token }) {
     }, []);
 
     useEffect(() => {
-        if (!selected) {
+        if (entities.length === 0) {
+            setStats([]);
+            return;
+        }
+
+        setIsStatsLoading(true);
+        Promise.all(
+            entities.slice(0, 6).map(async (entity) => {
+                try {
+                    const list = await fetchRecords(entity);
+                    return {
+                        entity,
+                        count: Array.isArray(list) ? list.length : 0,
+                    };
+                } catch {
+                    return {
+                        entity,
+                        count: 0,
+                    };
+                }
+            })
+        )
+            .then(setStats)
+            .finally(() => setIsStatsLoading(false));
+    }, [entities]);
+
+    useEffect(() => {
+        if (!selected || activeView !== 'entity') {
+            setColumns([]);
             setRows([]);
             return;
         }
 
         setIsLoading(true);
-        fetchRecords(selected)
-            .then(setRows)
+        Promise.all([fetchSchema(selected), fetchRecords(selected)])
+            .then(([schema, list]) => {
+                setColumns(Array.isArray(schema) ? schema : []);
+                setRows(Array.isArray(list) ? list : []);
+            })
             .finally(() => setIsLoading(false));
-    }, [selected]);
+    }, [selected, activeView]);
 
     const onSave = async () => {
-        await saveRecord(selected, draft.id, draft);
-        setDraft(null);
-        setRows(await fetchRecords(selected));
+        if (!draft || !selected) {
+            return;
+        }
+
+        setSaving(true);
+        try {
+            await saveRecord(selected, draft.id, draft);
+            setDraft(null);
+            setRows(await fetchRecords(selected));
+        } finally {
+            setSaving(false);
+        }
     };
 
     const onDelete = async (id) => {
@@ -689,73 +777,228 @@ function EntityPage({ token }) {
         setRows(await fetchRecords(selected));
     };
 
+    const openCreateModal = () => {
+        const nextDraft = {};
+        fieldColumns.forEach((column) => {
+            nextDraft[column.name] = '';
+        });
+        setDraft(nextDraft);
+    };
+
+    const handleLogout = async () => {
+        try {
+            await logout();
+        } catch {
+            // Local logout still proceeds if token is expired.
+        }
+
+        onLogout();
+    };
+
+    const selectDashboard = () => {
+        setActiveView('dashboard');
+    };
+
+    const selectEntity = (entity) => {
+        setSelected(entity);
+        setActiveView('entity');
+    };
+
+    const iconByEntity = (name) => {
+        const normalized = String(name || '').toLowerCase();
+        if (normalized.includes('user')) return FiUsers;
+        if (normalized.includes('city')) return FiMapPin;
+        if (normalized.includes('activ')) return FiActivity;
+        return FiGrid;
+    };
+
     return (
-        <div className="layout">
-            <EntitySidebar entities={entities} selected={selected} onSelect={setSelected} />
-            <main className="content">
-                <div className="panel row-between">
-                    <h2>{selected || 'No entity selected'}</h2>
-                    <button className="btn-primary" onClick={() => setDraft({})} type="button">
-                        <FiPlus /> New
-                    </button>
-                </div>
-                <div className="panel table-wrap">
-                    {isLoading ? (
-                        <p>Loading records...</p>
-                    ) : (
-                        <table>
-                            <thead>
-                                <tr>
-                                    {(rows[0] ? Object.keys(rows[0]) : []).map((key) => (
-                                        <th key={key}>{key}</th>
-                                    ))}
-                                    <th>Actions</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {rows.map((row) => (
-                                    <tr key={row.id ?? JSON.stringify(row)}>
-                                        {Object.entries(row).map(([key, value]) => (
-                                            <td key={key}>{String(value ?? '')}</td>
-                                        ))}
-                                        <td>
-                                            <div className="action-row">
-                                                <button type="button" onClick={() => setDraft(row)} aria-label="Edit">
-                                                    <FiEdit2 />
-                                                </button>
-                                                <button type="button" onClick={() => onDelete(row.id)} aria-label="Delete">
-                                                    <FiTrash2 />
-                                                </button>
+        <div className="min-h-screen bg-[radial-gradient(1200px_500px_at_-10%_-5%,rgba(62,131,255,0.22),transparent_55%),radial-gradient(900px_380px_at_110%_-20%,rgba(225,29,72,0.2),transparent_52%),linear-gradient(180deg,#071322_0%,#050d18_65%)] p-3 text-slate-100 md:p-4">
+            <div className="grid min-h-[calc(100vh-24px)] grid-cols-1 gap-4 lg:grid-cols-[260px_minmax(0,1fr)]">
+                <EntitySidebar
+                    entities={entities}
+                    selectedEntity={selected}
+                    activeView={activeView}
+                    onSelectEntity={selectEntity}
+                    onSelectDashboard={selectDashboard}
+                />
+                <main className="min-w-0">
+                    <header className="mb-4 flex flex-col gap-3 rounded-2xl border border-slate-700/60 bg-slate-900/60 p-4 shadow-xl shadow-black/20 md:flex-row md:items-center md:justify-between">
+                        <div>
+                            <p className="m-0 text-[11px] uppercase tracking-[0.14em] text-slate-400">Welcome, Admin</p>
+                            <h2 className="mt-1 text-2xl font-semibold capitalize">
+                                {activeView === 'dashboard' ? 'Dashboard' : selected || 'No entity selected'}
+                            </h2>
+                        </div>
+                        <div className="flex items-center gap-2 self-end md:self-auto">
+                            <button
+                                className="inline-flex items-center gap-2 rounded-lg border border-slate-600 px-3 py-2 text-sm font-medium text-slate-200 transition hover:bg-slate-800"
+                                type="button"
+                                onClick={handleLogout}
+                            >
+                                <FiLogOut /> Logout
+                            </button>
+                            <button
+                                className="inline-flex items-center gap-2 rounded-lg bg-rose-600 px-3 py-2 text-sm font-medium text-white transition hover:bg-rose-500 disabled:cursor-not-allowed disabled:opacity-50"
+                                onClick={openCreateModal}
+                                type="button"
+                                disabled={!selected || activeView !== 'entity'}
+                            >
+                                <FiPlus /> New
+                            </button>
+                        </div>
+                    </header>
+
+                    {activeView === 'dashboard' ? (
+                        <>
+                            <section className="mb-4 grid grid-cols-2 gap-3 lg:grid-cols-3 xl:grid-cols-6">
+                                {(isStatsLoading ? Array.from({ length: 6 }).map((_, idx) => ({ entity: `item-${idx}`, count: 0 })) : stats).map((item) => {
+                                    const Icon = iconByEntity(item.entity);
+                                    return (
+                                        <article key={item.entity} className="rounded-xl border border-slate-700/60 bg-slate-900/60 p-4 shadow-lg shadow-black/20">
+                                            <div className="mb-3 inline-flex rounded-lg bg-rose-500/15 p-2 text-rose-400">
+                                                <Icon />
                                             </div>
-                                        </td>
-                                    </tr>
-                                ))}
-                            </tbody>
-                        </table>
-                    )}
-                </div>
-            </main>
-            {draft && (
-                <div className="modal-backdrop">
-                    <div className="modal">
-                        <h3>{draft.id ? 'Edit record' : 'Create record'}</h3>
-                        {Object.keys(draft).map((key) => (
-                            key !== 'id' && (
-                                <label key={key}>
-                                    <span>{key}</span>
+                                            <p className="text-2xl font-semibold">{isStatsLoading ? '-' : item.count}</p>
+                                            <p className="mt-1 text-xs capitalize text-slate-400">{item.entity}</p>
+                                        </article>
+                                    );
+                                })}
+                            </section>
+
+                            <section className="grid grid-cols-1 gap-4 xl:grid-cols-[2fr_1fr]">
+                                <article className="rounded-2xl border border-slate-700/60 bg-slate-900/60 p-4 shadow-xl shadow-black/20">
+                                    <h3 className="mb-4 text-sm font-semibold">Items per Entity</h3>
+                                    <div className="flex h-52 items-end gap-2">
+                                        {stats.slice(0, 12).map((item, idx) => (
+                                            <div key={item.entity} className="flex flex-1 flex-col items-center gap-2">
+                                                <div
+                                                    className="w-full rounded-t bg-rose-500/90"
+                                                    style={{ height: `${Math.max(18, Math.min(170, item.count * 10 + 18))}px` }}
+                                                />
+                                                <span className="w-full truncate text-center text-[10px] text-slate-400">
+                                                    {idx + 1}
+                                                </span>
+                                            </div>
+                                        ))}
+                                    </div>
+                                </article>
+                                <article className="rounded-2xl border border-slate-700/60 bg-slate-900/60 p-4 shadow-xl shadow-black/20">
+                                    <h3 className="mb-4 text-sm font-semibold">Distribution</h3>
+                                    <div className="mx-auto mt-3 h-44 w-44 rounded-full border-[16px] border-rose-400/90 border-r-rose-600 border-b-rose-500" />
+                                    <p className="mt-4 text-center text-xs text-slate-400">Live entity split preview</p>
+                                </article>
+                            </section>
+                        </>
+                    ) : (
+                        <section className="rounded-2xl border border-slate-700/60 bg-slate-900/60 p-4 shadow-xl shadow-black/20">
+                            <div className="mb-3 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                                <h3 className="text-xl font-semibold capitalize">{selected}</h3>
+                                <label className="relative block w-full md:w-72">
+                                    <FiSearch className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
                                     <input
-                                        value={draft[key] ?? ''}
-                                        onChange={(e) => setDraft((current) => ({ ...current, [key]: e.target.value }))}
+                                        value={query}
+                                        onChange={(event) => setQuery(event.target.value)}
+                                        placeholder="Search..."
+                                        className="w-full rounded-lg border border-slate-700 bg-slate-950 pl-10 pr-3 py-2 text-sm text-slate-100 outline-none transition focus:border-rose-500"
+                                    />
+                                </label>
+                            </div>
+
+                            <div className="overflow-x-auto">
+                                {!selected ? (
+                                    <p className="text-slate-400">Choose an entity from the sidebar to start.</p>
+                                ) : isLoading ? (
+                                    <div className="space-y-2">
+                                        <div className="h-8 animate-pulse rounded bg-slate-800" />
+                                        <div className="h-8 animate-pulse rounded bg-slate-800" />
+                                        <div className="h-8 animate-pulse rounded bg-slate-800" />
+                                        <div className="h-8 animate-pulse rounded bg-slate-800" />
+                                    </div>
+                                ) : (
+                                    <table className="w-full min-w-[860px] border-collapse text-left text-sm">
+                                        <thead>
+                                            <tr>
+                                                {(rows[0] ? Object.keys(rows[0]) : fieldColumns.map((column) => column.name)).map((key) => (
+                                                    <th key={key} className="border-b border-slate-700 px-2 py-3 font-semibold text-slate-100">{key}</th>
+                                                ))}
+                                                <th className="border-b border-slate-700 px-2 py-3 font-semibold text-slate-100">Actions</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {filteredRows.map((row) => (
+                                                <tr key={row.id ?? JSON.stringify(row)} className="transition hover:bg-slate-800/50">
+                                                    {Object.entries(row).map(([key, value]) => (
+                                                        <td key={key} className="border-b border-slate-800 px-2 py-3 text-slate-200">{String(value ?? '')}</td>
+                                                    ))}
+                                                    <td className="border-b border-slate-800 px-2 py-3">
+                                                        <div className="flex gap-2">
+                                                            <button
+                                                                type="button"
+                                                                className="rounded-md border border-slate-700 p-2 text-slate-200 transition hover:bg-slate-800"
+                                                                onClick={() => setDraft(row)}
+                                                                aria-label="Edit"
+                                                            >
+                                                                <FiEdit2 />
+                                                            </button>
+                                                            <button
+                                                                type="button"
+                                                                className="rounded-md border border-slate-700 p-2 text-slate-200 transition hover:bg-slate-800"
+                                                                onClick={() => onDelete(row.id)}
+                                                                aria-label="Delete"
+                                                            >
+                                                                <FiTrash2 />
+                                                            </button>
+                                                        </div>
+                                                    </td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                )}
+                            </div>
+                        </section>
+                    )}
+                </main>
+            </div>
+            {draft && (
+                <div className="fixed inset-0 z-20 grid place-items-center bg-slate-950/70 p-4 backdrop-blur-[1px]">
+                    <div className="w-full max-w-xl rounded-2xl border border-slate-700 bg-slate-900 p-5 shadow-2xl shadow-black/30">
+                        <h3 className="mb-2 text-xl font-semibold">{draft.id ? 'Edit record' : 'Create record'}</h3>
+                        {(fieldColumns.length > 0 ? fieldColumns : Object.keys(draft).map((name) => ({ name, type: 'string' }))).map((column) => (
+                            column.name !== 'id' && (
+                                <label key={column.name} className="mt-3 block">
+                                    <span className="mb-1 block text-xs uppercase tracking-wide text-slate-400">{column.name}</span>
+                                    <input
+                                        type={String(column.type || '').includes('int') ? 'number' : 'text'}
+                                        placeholder={`Enter ${column.name}`}
+                                        value={draft[column.name] ?? ''}
+                                        className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 outline-none transition focus:border-rose-500"
+                                        onChange={(e) => setDraft((current) => ({ ...current, [column.name]: e.target.value }))}
                                     />
                                 </label>
                             )
                         ))}
-                        {Object.keys(draft).length === 0 && (
-                            <p className="muted">Record has no editable fields yet. Add columns and refresh.</p>
+                        {fieldColumns.length === 0 && (
+                            <p className="text-slate-400">Record has no editable fields yet. Add columns and refresh.</p>
                         )}
-                        <div className="row-end">
-                            <button className="btn-ghost" type="button" onClick={() => setDraft(null)}>Cancel</button>
-                            <button className="btn-primary" type="button" onClick={onSave}>Save</button>
+                        <div className="mt-5 flex justify-end gap-2">
+                            <button
+                                className="rounded-lg border border-slate-600 px-3 py-2 text-sm font-medium text-slate-200 transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+                                type="button"
+                                onClick={() => setDraft(null)}
+                                disabled={saving}
+                            >
+                                Cancel
+                            </button>
+                            <button
+                                className="rounded-lg bg-rose-600 px-3 py-2 text-sm font-medium text-white transition hover:bg-rose-500 disabled:cursor-not-allowed disabled:opacity-50"
+                                type="button"
+                                onClick={onSave}
+                                disabled={saving}
+                            >
+                                {saving ? 'Saving...' : 'Save'}
+                            </button>
                         </div>
                     </div>
                 </div>
@@ -784,7 +1027,7 @@ export default function App() {
             />
             <Route
                 path="/"
-                element={auth.token ? <EntityPage token={auth.token} /> : <Navigate to="/login" replace />}
+                element={auth.token ? <EntityPage token={auth.token} onLogout={() => dispatch(clearAuth())} /> : <Navigate to="/login" replace />}
             />
             <Route path="*" element={<Navigate to={auth.token ? '/' : '/login'} replace />} />
         </Routes>
@@ -828,6 +1071,15 @@ export const fetchEntities = async () => {
     return Array.isArray(data?.entities) ? data.entities : [];
 };
 
+export const fetchSchema = async (entity) => {
+    const { data } = await api.get(`/admin-dashboard/${entity}/schema`);
+    if (Array.isArray(data?.columns)) {
+        return data.columns;
+    }
+
+    return [];
+};
+
 export const fetchRecords = async (entity) => {
     const { data } = await api.get(`/admin-dashboard/${entity}/records`);
     if (Array.isArray(data)) return data;
@@ -851,171 +1103,15 @@ export const deleteRecord = async (entity, id) => {
 };
 JS;
 
-        return str_replace('__API_URL__', $apiUrl, $template);
+    $resolvedApiUrl = trim($apiUrl) !== '' ? $apiUrl : 'http://localhost:8000/api';
+
+    return str_replace('__API_URL__', $resolvedApiUrl, $template);
         }
 
         private function frontendStylesCss(string $themeMode): string
         {
-                $background = $themeMode === 'light' ? '#f8fafc' : '#0d141b';
-                $text = $themeMode === 'light' ? '#0f172a' : '#e8ecf1';
-                $panel = $themeMode === 'light' ? '#ffffff' : '#111a24';
-        $colorScheme = $themeMode === 'both' ? 'dark light' : $themeMode;
-
-                return <<<CSS
+                return <<<'CSS'
 @import "tailwindcss";
-
-:root {
-    color-scheme: {$colorScheme};
-    --bg: {$background};
-    --text: {$text};
-    --panel: {$panel};
-    --brand: #e11d48;
-    --muted: #94a3b8;
-}
-
-* { box-sizing: border-box; }
-
-body {
-    margin: 0;
-    background: radial-gradient(circle at 0% 0%, #1f2a37 0%, var(--bg) 45%);
-    color: var(--text);
-    font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
-}
-
-.layout {
-    display: grid;
-    grid-template-columns: 280px 1fr;
-    min-height: 100vh;
-}
-
-.content {
-    padding: 24px;
-}
-
-.panel {
-    background: var(--panel);
-    border: 1px solid rgba(148, 163, 184, 0.2);
-    border-radius: 12px;
-    padding: 16px;
-    margin-bottom: 16px;
-}
-
-.row-between {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-}
-
-.row-end {
-    display: flex;
-    justify-content: flex-end;
-    gap: 10px;
-    margin-top: 16px;
-}
-
-.btn-primary,
-.btn-ghost,
-button {
-    border: 0;
-    border-radius: 8px;
-    padding: 8px 12px;
-    cursor: pointer;
-}
-
-.btn-primary {
-    background: var(--brand);
-    color: #fff;
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
-}
-
-.btn-ghost {
-    background: transparent;
-    border: 1px solid rgba(148, 163, 184, 0.3);
-    color: var(--text);
-}
-
-.table-wrap {
-    overflow-x: auto;
-}
-
-table {
-    width: 100%;
-    border-collapse: collapse;
-    min-width: 760px;
-}
-
-th,
-td {
-    text-align: left;
-    padding: 10px;
-    border-bottom: 1px solid rgba(148, 163, 184, 0.2);
-}
-
-.action-row {
-    display: flex;
-    gap: 8px;
-}
-
-.modal-backdrop {
-    position: fixed;
-    inset: 0;
-    background: rgba(0, 0, 0, 0.5);
-    display: grid;
-    place-items: center;
-    padding: 20px;
-}
-
-.modal {
-    width: min(560px, 100%);
-    background: var(--panel);
-    border-radius: 14px;
-    border: 1px solid rgba(148, 163, 184, 0.25);
-    padding: 20px;
-}
-
-label {
-    display: block;
-    margin-top: 12px;
-}
-
-label span {
-    display: block;
-    font-size: 0.82rem;
-    margin-bottom: 6px;
-    color: var(--muted);
-}
-
-input {
-    width: 100%;
-    border-radius: 8px;
-    border: 1px solid rgba(148, 163, 184, 0.35);
-    background: transparent;
-    color: var(--text);
-    padding: 10px;
-}
-
-.muted {
-    color: var(--muted);
-}
-
-.login-shell {
-    min-height: 100vh;
-    display: grid;
-    place-items: center;
-    padding: 24px;
-}
-
-.login-card {
-    width: min(420px, 100%);
-}
-
-@media (max-width: 960px) {
-    .layout {
-        grid-template-columns: 1fr;
-    }
-}
 CSS;
         }
 
@@ -1108,20 +1204,36 @@ export default function LoginPage({ onSuccess }) {
     };
 
     return (
-        <main className="login-shell">
-            <form className="panel login-card" onSubmit={submit}>
-                <h1>Architector Admin</h1>
-                <p className="muted">Sign in with your admin account</p>
-                <label>
-                    <span>Email</span>
-                    <input value={email} onChange={(e) => setEmail(e.target.value)} type="email" required />
+        <main className="grid min-h-screen place-items-center bg-[radial-gradient(1200px_500px_at_-10%_-5%,rgba(62,131,255,0.22),transparent_55%),radial-gradient(900px_380px_at_110%_-20%,rgba(225,29,72,0.2),transparent_52%),linear-gradient(180deg,#071322_0%,#050d18_65%)] p-4 text-slate-100">
+            <form className="w-full max-w-md rounded-2xl border border-slate-700/60 bg-slate-900/70 p-6 shadow-2xl shadow-black/30" onSubmit={submit}>
+                <h1 className="text-2xl font-semibold">Architector Admin</h1>
+                <p className="mt-1 text-sm text-slate-400">Sign in with your admin account</p>
+                <label className="mt-4 block">
+                    <span className="mb-1 block text-xs uppercase tracking-wide text-slate-400">Email</span>
+                    <input
+                        className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 outline-none transition focus:border-rose-500"
+                        value={email}
+                        onChange={(e) => setEmail(e.target.value)}
+                        type="email"
+                        required
+                    />
                 </label>
-                <label>
-                    <span>Password</span>
-                    <input value={password} onChange={(e) => setPassword(e.target.value)} type="password" required />
+                <label className="mt-3 block">
+                    <span className="mb-1 block text-xs uppercase tracking-wide text-slate-400">Password</span>
+                    <input
+                        className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 outline-none transition focus:border-rose-500"
+                        value={password}
+                        onChange={(e) => setPassword(e.target.value)}
+                        type="password"
+                        required
+                    />
                 </label>
-                {error && <p className="muted">{error}</p>}
-                <button className="btn-primary" type="submit" disabled={loading}>
+                {error && <p className="mt-3 text-sm text-rose-300">{error}</p>}
+                <button
+                    className="mt-5 inline-flex w-full items-center justify-center rounded-lg bg-rose-600 px-3 py-2 text-sm font-medium text-white transition hover:bg-rose-500 disabled:cursor-not-allowed disabled:opacity-50"
+                    type="submit"
+                    disabled={loading}
+                >
                     {loading ? 'Signing in...' : 'Login'}
                 </button>
             </form>
@@ -1135,22 +1247,54 @@ JSX;
         {
                 return <<<'JSX'
 import React from 'react';
+import { FiGrid, FiLayers } from 'react-icons/fi';
 
-export default function EntitySidebar({ entities, selected, onSelect }) {
+export default function EntitySidebar({ entities, selectedEntity, activeView, onSelectEntity, onSelectDashboard }) {
     return (
-        <aside className="panel" style={{ margin: 16 }}>
-            <h3 style={{ marginTop: 0 }}>Entities</h3>
-            <div style={{ display: 'grid', gap: 8 }}>
+        <aside className="flex min-h-[calc(100vh-24px)] flex-col rounded-2xl border border-slate-700/60 bg-slate-900/60 p-4 shadow-xl shadow-black/20 lg:min-h-[calc(100vh-32px)]">
+            <div className="mb-4 border-b border-slate-700 pb-3">
+                <div className="flex items-center gap-2">
+                    <span className="inline-flex h-7 w-7 items-center justify-center rounded-lg bg-rose-500 text-sm font-bold text-white">O</span>
+                    <p className="m-0 text-lg font-semibold text-slate-100">OhMyGuide</p>
+                </div>
+                <p className="mt-1 text-[11px] uppercase tracking-[0.12em] text-rose-400">Admin</p>
+            </div>
+
+            <div className="mb-2 grid gap-2">
+                <button
+                    type="button"
+                    onClick={onSelectDashboard}
+                    className={
+                        activeView === 'dashboard'
+                            ? 'inline-flex items-center gap-2 rounded-lg bg-rose-500 px-3 py-2 text-left text-sm font-semibold text-white'
+                            : 'inline-flex items-center gap-2 rounded-lg px-3 py-2 text-left text-sm font-medium text-slate-300 transition hover:bg-slate-800'
+                    }
+                >
+                    <FiGrid /> Dashboard
+                </button>
+            </div>
+
+            <p className="mb-2 mt-1 text-xs uppercase tracking-[0.1em] text-slate-500">Entities</p>
+            <div className="grid gap-2">
                 {entities.map((entity) => (
                     <button
                         key={entity}
                         type="button"
-                        className={entity === selected ? 'btn-primary' : 'btn-ghost'}
-                        onClick={() => onSelect(entity)}
+                        className={
+                            activeView === 'entity' && entity === selectedEntity
+                                ? 'inline-flex items-center gap-2 rounded-lg bg-rose-500 px-3 py-2 text-left text-sm font-semibold text-white'
+                                : 'inline-flex items-center gap-2 rounded-lg border border-slate-800 bg-slate-950/40 px-3 py-2 text-left text-sm font-semibold text-slate-200 transition hover:bg-slate-800'
+                        }
+                        onClick={() => onSelectEntity(entity)}
                     >
+                        <FiLayers className="text-xs" />
                         {entity}
                     </button>
                 ))}
+            </div>
+
+            <div className="mt-auto border-t border-slate-700 pt-3 text-xs text-slate-400">
+                Dynamic CRUD from migration tables
             </div>
         </aside>
     );
