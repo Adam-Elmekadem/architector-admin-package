@@ -11,6 +11,8 @@ The package is designed for teams that want a fast and repeatable admin bootstra
 - Admin user create/login verification flow
 - Sanctum token issuance
 - API auth endpoint provisioning (`/api/auth/login`, `/api/auth/logout`, `/api/auth/me`)
+- Migration-driven CRUD generation (entities discovered from migrations)
+- Auto-generated CRUD controller/routes plus React CRUD modals and forms
 - React frontend scaffold (Vite + Tailwind v4 + Redux Toolkit + Router + Axios + React Icons)
 - Safe regeneration using `--force`
 
@@ -57,8 +59,13 @@ php artisan admin:setup \
 3. Issues a Sanctum token
 4. Ensures API auth controller exists at `app/Http/Controllers/Api/AuthController.php`
 5. Ensures auth routes exist in `routes/api.php`
-6. Writes/updates `config/admin_dashboard.php`
-7. Generates React frontend files (unless `--skip-frontend`)
+6. Generates migration-driven CRUD backend components:
+
+- `app/Http/Controllers/AdminDashboardCrudController.php`
+- `/api/admin-dashboard/*` entity/schema/records routes
+
+7. Writes/updates `config/admin_dashboard.php`
+8. Generates React frontend files (unless `--skip-frontend`), including CRUD table views and create/edit modals based on detected entity schemas
 
 ## Generated Frontend Stack
 

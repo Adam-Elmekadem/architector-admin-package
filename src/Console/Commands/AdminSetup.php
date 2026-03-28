@@ -972,6 +972,21 @@ function EntityPage({ token, currentUser, onLogout }) {
         localStorage.setItem('architector_dashboard_title', sanitized);
     };
 
+    const placeholderForField = (name, type) => {
+        const normalizedName = String(name || '').toLowerCase();
+        const normalizedType = String(type || '').toLowerCase();
+        const label = normalizedName.replace(/_/g, ' ');
+
+        if (normalizedType.includes('date')) return 'YYYY-MM-DD';
+        if (normalizedType.includes('time')) return 'YYYY-MM-DD HH:MM';
+        if (normalizedName.includes('email')) return 'name@example.com';
+        if (normalizedName.includes('phone') || normalizedName.includes('tel') || normalizedName.includes('mobile')) return '+212600000000';
+        if (normalizedName.includes('status')) return 'active / pending / archived';
+        if (normalizedName.includes('name')) return `Enter ${label}`;
+
+        return `Enter ${label}`;
+    };
+
     return (
         <div className="min-h-screen bg-[#050d1c] p-0 text-slate-100">
             <div className="grid min-h-screen grid-cols-1 lg:grid-cols-[178px_minmax(0,1fr)]">
@@ -1241,17 +1256,109 @@ function EntityPage({ token, currentUser, onLogout }) {
                                 column.name !== 'id' && (
                                     <label key={column.name} className="block">
                                         <span className="mb-1 block text-xs uppercase tracking-wide text-slate-500">{column.name}</span>
-                                        <input
-                                            value={editingRow[column.name] ?? ''}
-                                            type={String(column.type || '').includes('int') ? 'number' : 'text'}
-                                            onChange={(event) =>
-                                                setEditingRow((current) => ({
-                                                    ...current,
-                                                    [column.name]: event.target.value,
-                                                }))
-                                            }
-                                            className="h-10 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 text-sm text-slate-100 outline-none focus:border-slate-500"
-                                        />
+                                        {(column.input_type === 'select' || column.is_foreign_key) && Array.isArray(column.options) && column.options.length > 0 ? (
+                                            <select
+                                                value={String(editingRow[column.name] ?? '')}
+                                                onChange={(event) =>
+                                                    setEditingRow((current) => ({
+                                                        ...current,
+                                                        [column.name]: event.target.value,
+                                                    }))
+                                                }
+                                                className="h-10 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 text-sm text-slate-100 outline-none focus:border-slate-500"
+                                            >
+                                                <option value="">Select {column.name.replace(/_id$/i, '').replace(/_/g, ' ')}</option>
+                                                {column.options.map((option) => (
+                                                    <option key={`${column.name}-${option.value}`} value={String(option.value)}>
+                                                        {option.label}
+                                                    </option>
+                                                ))}
+                                            </select>
+                                        ) : column.input_type === 'radio' && Array.isArray(column.options) && column.options.length > 0 ? (
+                                            <div className="flex flex-wrap gap-3 rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100">
+                                                {column.options.map((option) => (
+                                                    <label key={`${column.name}-${option.value}`} className="inline-flex items-center gap-2">
+                                                        <input
+                                                            type="radio"
+                                                            name={column.name}
+                                                            value={String(option.value)}
+                                                            checked={String(editingRow[column.name] ?? '') === String(option.value)}
+                                                            onChange={(event) =>
+                                                                setEditingRow((current) => ({
+                                                                    ...current,
+                                                                    [column.name]: event.target.value,
+                                                                }))
+                                                            }
+                                                        />
+                                                        <span>{option.label}</span>
+                                                    </label>
+                                                ))}
+                                            </div>
+                                        ) : column.input_type === 'checkboxes' && Array.isArray(column.options) && column.options.length > 0 ? (
+                                            <div className="flex flex-wrap gap-3 rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100">
+                                                {column.options.map((option) => {
+                                                    const currentValues = String(editingRow[column.name] ?? '')
+                                                        .split(',')
+                                                        .map((item) => item.trim())
+                                                        .filter(Boolean);
+                                                    const checked = currentValues.includes(String(option.value));
+
+                                                    return (
+                                                        <label key={`${column.name}-${option.value}`} className="inline-flex items-center gap-2">
+                                                            <input
+                                                                type="checkbox"
+                                                                value={String(option.value)}
+                                                                checked={checked}
+                                                                onChange={(event) => {
+                                                                    const nextValues = event.target.checked
+                                                                        ? [...currentValues, String(option.value)]
+                                                                        : currentValues.filter((item) => item !== String(option.value));
+
+                                                                    setEditingRow((current) => ({
+                                                                        ...current,
+                                                                        [column.name]: nextValues.join(', '),
+                                                                    }));
+                                                                }}
+                                                            />
+                                                            <span>{option.label}</span>
+                                                        </label>
+                                                    );
+                                                })}
+                                            </div>
+                                        ) : column.input_type === 'textarea' ? (
+                                            <textarea
+                                                value={editingRow[column.name] ?? ''}
+                                                placeholder={column.placeholder || placeholderForField(column.name, column.type)}
+                                                onChange={(event) =>
+                                                    setEditingRow((current) => ({
+                                                        ...current,
+                                                        [column.name]: event.target.value,
+                                                    }))
+                                                }
+                                                className="min-h-24 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 outline-none focus:border-slate-500"
+                                            />
+                                        ) : (
+                                            <input
+                                                value={editingRow[column.name] ?? ''}
+                                                type={
+                                                    column.input_type === 'date'
+                                                        ? 'date'
+                                                        : column.input_type === 'datetime-local'
+                                                            ? 'datetime-local'
+                                                            : (column.input_type === 'number' || String(column.type || '').includes('int'))
+                                                                ? 'number'
+                                                                : 'text'
+                                                }
+                                                placeholder={column.placeholder || placeholderForField(column.name, column.type)}
+                                                onChange={(event) =>
+                                                    setEditingRow((current) => ({
+                                                        ...current,
+                                                        [column.name]: event.target.value,
+                                                    }))
+                                                }
+                                                className="h-10 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 text-sm text-slate-100 outline-none focus:border-slate-500"
+                                            />
+                                        )}
                                     </label>
                                 )
                             ))}
