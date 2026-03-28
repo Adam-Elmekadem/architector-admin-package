@@ -16,6 +16,11 @@ The package is designed for teams that want a fast and repeatable admin bootstra
 - React frontend scaffold (Vite + Tailwind v4 + Redux Toolkit + Router + Axios + React Icons)
 - Safe regeneration using `--force`
 
+## Release Docs
+
+- Changelog: `CHANGELOG.md`
+- Current release note: `docs/releases/V1.3.3.md`
+
 ## Requirements
 
 - PHP 8.2+
@@ -62,6 +67,9 @@ php artisan admin:setup \
 6. Generates migration-driven CRUD backend components:
 
 - `app/Http/Controllers/AdminDashboardCrudController.php`
+- `app/Support/AdminDashboard/FieldResolver.php`
+- `app/Support/AdminDashboard/EntityTableResolver.php`
+- `app/Support/AdminDashboard/CrudPayloadBuilder.php`
 - `/api/admin-dashboard/*` entity/schema/records routes
 
 7. Writes/updates `config/admin_dashboard.php`
