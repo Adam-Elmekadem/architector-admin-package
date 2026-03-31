@@ -1829,6 +1829,8 @@ class AdminDashboardCrudController extends Controller
                 'is_foreign_key' => $isForeignKey,
                 'related_table' => $relatedTable,
                 'options' => $isForeignKey ? $this->foreignKeyOptions($relatedTable) : [],
+                'validation' => $this->fieldValidationRule($table, $column, $columnMeta, $isForeignKey),
+                'relationship' => $isForeignKey ? $this->fieldRelationship($column) : null,
             ];
         }, Schema::getColumnListing($table));
 
@@ -1865,6 +1867,18 @@ class AdminDashboardCrudController extends Controller
             return response()->json(['message' => 'Entity table not found'], 404);
         }
 
+        $metadata = $this->columnMetadata($table);
+        $rules = [];
+        foreach (Schema::getColumnListing($table) as $column) {
+            $isForeignKey = $this->relatedTableFromForeignKey($column) !== null;
+            $rulesForColumn = $this->fieldValidationRule($table, $column, $metadata[$column] ?? [], $isForeignKey);
+            if ($rulesForColumn !== '') {
+                $rules[$column] = $rulesForColumn;
+            }
+        }
+
+        $request->validate($rules);
+
         $payload = $this->payloadForTable($request, $table);
         if ($payload === []) {
             return response()->json([
@@ -1895,6 +1909,18 @@ class AdminDashboardCrudController extends Controller
         if (! Schema::hasColumn($table, 'id')) {
             return response()->json(['message' => 'Entity does not support ID-based updates'], 422);
         }
+
+        $metadata = $this->columnMetadata($table);
+        $rules = [];
+        foreach (Schema::getColumnListing($table) as $column) {
+            $isForeignKey = $this->relatedTableFromForeignKey($column) !== null;
+            $rulesForColumn = $this->fieldValidationRule($table, $column, $metadata[$column] ?? [], $isForeignKey);
+            if ($rulesForColumn !== '') {
+                $rules[$column] = $rulesForColumn;
+            }
+        }
+
+        $request->validate($rules);
 
         $payload = $this->payloadForTable($request, $table);
         if ($payload === []) {
@@ -1984,6 +2010,58 @@ class AdminDashboardCrudController extends Controller
         }
 
         return $data;
+    }
+
+    private function fieldValidationRule(string $table, string $column, array $columnMeta, bool $isForeignKey): string
+    {
+        if (in_array($column, ['id', 'created_at', 'updated_at', 'deleted_at'], true)) {
+            return '';
+        }
+
+        $rules = [];
+        $nullable = array_key_exists('nullable', $columnMeta) && $columnMeta['nullable'];
+        $rules[] = $nullable ? 'nullable' : 'required';
+
+        if ($isForeignKey) {
+            $rules[] = 'integer';
+            $related = $this->relatedTableFromForeignKey($column);
+            if ($related !== null) {
+                $rules[] = 'exists:'.$related.',id';
+            }
+
+            return implode('|', $rules);
+        }
+
+        if (str_contains($column, 'email')) {
+            $rules[] = 'email';
+            if (! $nullable) {
+                $rules[] = 'unique:'.$table.','.$column;
+            }
+        } elseif (in_array($this->columnType($table, $column), ['integer', 'bigint', 'smallint', 'decimal', 'float', 'double', 'numeric'], true)) {
+            $rules[] = 'integer';
+        } elseif (in_array($this->columnType($table, $column), ['boolean', 'bool'], true)) {
+            $rules[] = 'boolean';
+        } elseif (str_contains($this->columnType($table, $column), 'date') || str_contains($this->columnType($table, $column), 'timestamp') || str_contains($this->columnType($table, $column), 'datetime')) {
+            $rules[] = 'date';
+        } else {
+            $rules[] = 'string';
+            $rules[] = 'max:255';
+        }
+
+        return implode('|', array_filter($rules));
+    }
+
+    private function fieldRelationship(string $column): array
+    {
+        $relatedTable = $this->relatedTableFromForeignKey($column);
+        $relatedModel = $relatedTable ? Str::studly(Str::singular($relatedTable)) : null;
+
+        return [
+            'type' => 'belongsTo',
+            'table' => $relatedTable,
+            'model' => $relatedModel,
+            'method' => $relatedModel ? lcfirst($relatedModel) : null,
+        ];
     }
 
     private function validateForeignKeys(string $table, array $payload): ?string

@@ -618,6 +618,8 @@ class AdminDashboardCrudController extends Controller
                 'options' => $fieldConfig['options'],
                 'input_type' => $fieldConfig['input_type'],
                 'placeholder' => $fieldConfig['placeholder'],
+                'validation' => $this->fieldValidationRule($table, $column, $columnMeta, $isForeignKey),
+                'relationship' => $isForeignKey ? $this->fieldRelationship($column) : null,
             ];
         }, Schema::getColumnListing($table));
 
@@ -654,6 +656,18 @@ class AdminDashboardCrudController extends Controller
             return response()->json(['message' => 'Entity table not found'], 404);
         }
 
+        $metadata = $this->tableResolver->columnMetadata($table);
+        $rules = [];
+        foreach (Schema::getColumnListing($table) as $column) {
+            $isForeignKey = $this->relatedTableFromForeignKey($column) !== null;
+            $rule = $this->fieldValidationRule($table, $column, $metadata[$column] ?? [], $isForeignKey);
+            if ($rule !== '') {
+                $rules[$column] = $rule;
+            }
+        }
+
+        $request->validate($rules);
+
         $payload = $this->payloadBuilder->payloadForTable($request, $table);
         if ($payload === []) {
             return response()->json([
@@ -685,13 +699,24 @@ class AdminDashboardCrudController extends Controller
             return response()->json(['message' => 'Entity does not support ID-based updates'], 422);
         }
 
+        $metadata = $this->tableResolver->columnMetadata($table);
+        $rules = [];
+        foreach (Schema::getColumnListing($table) as $column) {
+            $isForeignKey = $this->relatedTableFromForeignKey($column) !== null;
+            $rule = $this->fieldValidationRule($table, $column, $metadata[$column] ?? [], $isForeignKey);
+            if ($rule !== '') {
+                $rules[$column] = $rule;
+            }
+        }
+
+        $request->validate($rules);
+
         $payload = $this->payloadBuilder->payloadForTable($request, $table);
         if ($payload === []) {
             return response()->json([
                 'message' => 'No valid columns in payload for this entity',
                 'allowed' => $this->payloadBuilder->editableColumns($table),
             ], 422);
-        }
 
         $foreignKeyError = $this->payloadBuilder->validateForeignKeys($payload);
         if ($foreignKeyError !== null) {
