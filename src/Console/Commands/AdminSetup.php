@@ -594,7 +594,7 @@ class AdminDashboardCrudController extends Controller
         $metadata = $this->tableResolver->columnMetadata($table);
 
         $columns = array_map(function ($column) use ($table, $metadata) {
-            $relatedTable = $this->tableResolver->relatedTableFromForeignKey($column);
+            $relatedTable = $this->tableResolver->relatedTableFromForeignKeyInTable($table, $column);
             $isForeignKey = $relatedTable !== null;
             $columnMeta = $metadata[$column] ?? [];
             $required = array_key_exists('nullable', $columnMeta)
@@ -618,8 +618,8 @@ class AdminDashboardCrudController extends Controller
                 'options' => $fieldConfig['options'],
                 'input_type' => $fieldConfig['input_type'],
                 'placeholder' => $fieldConfig['placeholder'],
-                'validation' => $this->fieldValidationRule($table, $column, $columnMeta, $isForeignKey),
-                'relationship' => $isForeignKey ? $this->fieldRelationship($column) : null,
+                'validation' => $this->tableResolver->validationRuleForColumn($table, $column),
+                'relationship' => $isForeignKey ? $this->tableResolver->relationshipForColumn($table, $column) : null,
             ];
         }, Schema::getColumnListing($table));
 
@@ -656,17 +656,7 @@ class AdminDashboardCrudController extends Controller
             return response()->json(['message' => 'Entity table not found'], 404);
         }
 
-        $metadata = $this->tableResolver->columnMetadata($table);
-        $rules = [];
-        foreach (Schema::getColumnListing($table) as $column) {
-            $isForeignKey = $this->relatedTableFromForeignKey($column) !== null;
-            $rule = $this->fieldValidationRule($table, $column, $metadata[$column] ?? [], $isForeignKey);
-            if ($rule !== '') {
-                $rules[$column] = $rule;
-            }
-        }
-
-        $request->validate($rules);
+        $request->validate($this->validationRules($table));
 
         $payload = $this->payloadBuilder->payloadForTable($request, $table);
         if ($payload === []) {
@@ -699,17 +689,12 @@ class AdminDashboardCrudController extends Controller
             return response()->json(['message' => 'Entity does not support ID-based updates'], 422);
         }
 
-        $metadata = $this->tableResolver->columnMetadata($table);
-        $rules = [];
-        foreach (Schema::getColumnListing($table) as $column) {
-            $isForeignKey = $this->relatedTableFromForeignKey($column) !== null;
-            $rule = $this->fieldValidationRule($table, $column, $metadata[$column] ?? [], $isForeignKey);
-            if ($rule !== '') {
-                $rules[$column] = $rule;
-            }
+        $exists = DB::table($table)->where('id', $id)->exists();
+        if (! $exists) {
+            return response()->json(['message' => 'Record not found'], 404);
         }
 
-        $request->validate($rules);
+        $request->validate($this->validationRules($table, true, $id));
 
         $payload = $this->payloadBuilder->payloadForTable($request, $table);
         if ($payload === []) {
@@ -717,15 +702,11 @@ class AdminDashboardCrudController extends Controller
                 'message' => 'No valid columns in payload for this entity',
                 'allowed' => $this->payloadBuilder->editableColumns($table),
             ], 422);
+        }
 
         $foreignKeyError = $this->payloadBuilder->validateForeignKeys($payload);
         if ($foreignKeyError !== null) {
             return response()->json(['message' => $foreignKeyError], 422);
-        }
-
-        $exists = DB::table($table)->where('id', $id)->exists();
-        if (! $exists) {
-            return response()->json(['message' => 'Record not found'], 404);
         }
 
         DB::table($table)->where('id', $id)->update($payload);
@@ -792,6 +773,21 @@ class AdminDashboardCrudController extends Controller
 
         return response()->json(['success' => true, 'message' => 'Password reset', 'temp_password' => $tempPassword]);
     }
+
+    /** @return array<string, string> */
+    private function validationRules(string $table, bool $forUpdate = false, ?int $ignoreId = null): array
+    {
+        $rules = [];
+
+        foreach (Schema::getColumnListing($table) as $column) {
+            $rule = $this->tableResolver->validationRuleForColumn($table, $column, $forUpdate, $ignoreId);
+            if ($rule !== '') {
+                $rules[$column] = $rule;
+            }
+        }
+
+        return $rules;
+    }
 }
 PHP;
         }
@@ -823,6 +819,9 @@ class EntityTableResolver
         'migrations',
     ];
 
+    /** @var array<string, array<string, array<string, mixed>>> */
+    private array $migrationDefinitionCache = [];
+
     public function resolveTable(string $entity): ?string
     {
         $table = preg_replace('/[^a-z0-9_]+/i', '', strtolower(trim($entity)));
@@ -844,8 +843,23 @@ class EntityTableResolver
 
     public function relatedTableFromForeignKey(string $column): ?string
     {
+        return $this->relatedTableFromForeignKeyInTable('', $column);
+    }
+
+    public function relatedTableFromForeignKeyInTable(string $table, string $column): ?string
+    {
         if (! Str::endsWith($column, '_id')) {
             return null;
+        }
+
+        if ($table !== '') {
+            $definition = $this->migrationColumnDefinitions($table)[$column] ?? null;
+            if (is_array($definition) && isset($definition['related_table']) && is_string($definition['related_table'])) {
+                $relatedTable = strtolower(trim($definition['related_table']));
+                if ($relatedTable !== '' && Schema::hasTable($relatedTable) && Schema::hasColumn($relatedTable, 'id')) {
+                    return $relatedTable;
+                }
+            }
         }
 
         $base = Str::beforeLast($column, '_id');
@@ -908,6 +922,135 @@ class EntityTableResolver
         }
     }
 
+    /**
+     * @return array<string, mixed>
+     */
+    public function migrationColumnDefinition(string $table, string $column): array
+    {
+        return $this->migrationColumnDefinitions($table)[$column] ?? [];
+    }
+
+    /**
+     * @return array<string, array<string, mixed>>
+     */
+    public function migrationColumnDefinitions(string $table): array
+    {
+        $table = strtolower(trim($table));
+        if ($table === '') {
+            return [];
+        }
+
+        if (isset($this->migrationDefinitionCache[$table])) {
+            return $this->migrationDefinitionCache[$table];
+        }
+
+        $definitions = [];
+        $migrationFiles = File::glob(database_path('migrations/*.php')) ?: [];
+
+        foreach ($migrationFiles as $file) {
+            $contents = File::get($file);
+            $parsed = $this->parseMigrationColumnsFromContents($contents, $table);
+
+            foreach ($parsed as $column => $definition) {
+                $existing = $definitions[$column] ?? [];
+                $definitions[$column] = $this->mergeDefinition($existing, $definition);
+            }
+        }
+
+        $this->migrationDefinitionCache[$table] = $definitions;
+
+        return $definitions;
+    }
+
+    /**
+     * @return array<string, string>|null
+     */
+    public function relationshipForColumn(string $table, string $column): ?array
+    {
+        $related = $this->relatedTableFromForeignKeyInTable($table, $column);
+        if ($related === null) {
+            return null;
+        }
+
+        $modelClass = Str::studly(Str::singular($related));
+
+        return [
+            'type' => 'belongsTo',
+            'method' => Str::camel(Str::beforeLast($column, '_id')),
+            'foreign_key' => $column,
+            'related_table' => $related,
+            'related_model' => "App\\Models\\{$modelClass}",
+            'eloquent' => "public function ".Str::camel(Str::beforeLast($column, '_id'))."() { return \$this->belongsTo(\\App\\Models\\{$modelClass}::class, '{$column}'); }",
+        ];
+    }
+
+    public function validationRuleForColumn(string $table, string $column, bool $forUpdate = false, ?int $ignoreId = null): string
+    {
+        if (in_array($column, ['id', 'created_at', 'updated_at', 'deleted_at'], true)) {
+            return '';
+        }
+
+        if (! Schema::hasColumn($table, $column)) {
+            return '';
+        }
+
+        $columnType = strtolower($this->columnType($table, $column));
+        $metadata = $this->columnMetadata($table)[$column] ?? [];
+        $definition = $this->migrationColumnDefinition($table, $column);
+        $relatedTable = $this->relatedTableFromForeignKeyInTable($table, $column);
+
+        $rules = [];
+        if ($forUpdate) {
+            $rules[] = 'sometimes';
+        }
+
+        $isNullable = (bool) ($metadata['nullable'] ?? false) || (bool) ($definition['nullable'] ?? false);
+        $rules[] = $isNullable ? 'nullable' : 'required';
+
+        if ($relatedTable !== null) {
+            $rules[] = 'integer';
+            $rules[] = "exists:{$relatedTable},id";
+        } else {
+            if (in_array($columnType, ['string', 'char', 'varchar'], true)) {
+                $rules[] = 'string';
+                $max = (int) ($definition['max'] ?? 255);
+                $rules[] = 'max:'.($max > 0 ? $max : 255);
+            } elseif (in_array($columnType, ['text', 'mediumtext', 'longtext'], true)) {
+                $rules[] = 'string';
+            } elseif (in_array($columnType, ['integer', 'bigint', 'smallint', 'tinyint'], true)) {
+                $rules[] = 'integer';
+            } elseif (in_array($columnType, ['decimal', 'float', 'double'], true)) {
+                $rules[] = 'numeric';
+            } elseif (in_array($columnType, ['boolean', 'bool'], true)) {
+                $rules[] = 'boolean';
+            } elseif (in_array($columnType, ['date'], true)) {
+                $rules[] = 'date';
+            } elseif (in_array($columnType, ['datetime', 'timestamp'], true)) {
+                $rules[] = 'date';
+            }
+
+            if (str_contains(strtolower($column), 'email')) {
+                $rules[] = 'email';
+            }
+
+            $enumOptions = $definition['enum'] ?? [];
+            if (is_array($enumOptions) && count($enumOptions) > 0) {
+                $rules[] = 'in:'.implode(',', array_map(fn ($value) => (string) $value, $enumOptions));
+            }
+        }
+
+        $isUnique = (bool) ($definition['unique'] ?? false);
+        if ($isUnique) {
+            if ($forUpdate && $ignoreId !== null) {
+                $rules[] = "unique:{$table},{$column},{$ignoreId},id";
+            } else {
+                $rules[] = "unique:{$table},{$column}";
+            }
+        }
+
+        return implode('|', array_values(array_unique($rules)));
+    }
+
     public function columnMetadata(string $table): array
     {
         try {
@@ -965,6 +1108,160 @@ class EntityTableResolver
         sort($tables);
 
         return $tables;
+    }
+
+    /**
+     * @return array<string, array<string, mixed>>
+     */
+    private function parseMigrationColumnsFromContents(string $contents, string $table): array
+    {
+        $result = [];
+        $tablePattern = preg_quote($table, '/');
+        $blockPattern = "/Schema::(?:create|table)\\(\\s*['\"]{$tablePattern}['\"]\\s*,\\s*function\\s*\\([^)]*\\)\\s*\\{([\\s\\S]*?)\\}\\s*\\);/i";
+
+        if (! preg_match_all($blockPattern, $contents, $blocks)) {
+            return $result;
+        }
+
+        foreach ($blocks[1] as $block) {
+            if (! is_string($block)) {
+                continue;
+            }
+
+            if (! preg_match_all('/\\$table->([a-zA-Z_][a-zA-Z0-9_]*)\\((.*?)\\)([^;]*);/s', $block, $statements, PREG_SET_ORDER)) {
+                continue;
+            }
+
+            foreach ($statements as $statement) {
+                $method = strtolower((string) ($statement[1] ?? ''));
+                $args = (string) ($statement[2] ?? '');
+                $chain = (string) ($statement[3] ?? '');
+
+                if ($method === '' || str_starts_with($method, 'drop')) {
+                    continue;
+                }
+
+                if ($method === 'unique') {
+                    if (preg_match('/[\'\"]([a-zA-Z0-9_]+)[\'\"]/', $args, $columnMatch)) {
+                        $column = strtolower((string) $columnMatch[1]);
+                        $result[$column] = $this->mergeDefinition($result[$column] ?? [], ['unique' => true]);
+                    }
+                    continue;
+                }
+
+                $column = $this->extractColumnNameFromMigrationCall($method, $args);
+                if ($column === null || $column === '') {
+                    continue;
+                }
+
+                $definition = [
+                    'type' => $method,
+                    'nullable' => str_contains(strtolower($chain), '->nullable(') || str_contains(strtolower($chain), '->nullable()'),
+                    'unique' => str_contains(strtolower($chain), '->unique(') || str_contains(strtolower($chain), '->unique()'),
+                    'max' => $this->extractStringLength($method, $args),
+                    'enum' => $this->extractEnumOptions($method, $args),
+                ];
+
+                if (str_ends_with($column, '_id') || str_contains(strtolower($chain), '->constrained(') || str_contains(strtolower($chain), '->constrained()')) {
+                    $definition['is_foreign_key'] = true;
+                    $definition['related_table'] = $this->extractRelatedTableFromChain($chain)
+                        ?? Str::plural(Str::beforeLast($column, '_id'));
+                }
+
+                $result[$column] = $this->mergeDefinition($result[$column] ?? [], $definition);
+            }
+        }
+
+        return $result;
+    }
+
+    private function extractColumnNameFromMigrationCall(string $method, string $args): ?string
+    {
+        if ($method === 'foreignidfor') {
+            if (preg_match('/([A-Z][A-Za-z0-9_\\\\]+)::class/', $args, $classMatch)) {
+                $class = class_basename((string) $classMatch[1]);
+
+                return strtolower(Str::snake($class)).'_id';
+            }
+
+            return null;
+        }
+
+        if (! preg_match('/[\'\"]([a-zA-Z0-9_]+)[\'\"]/', $args, $match)) {
+            return null;
+        }
+
+        return strtolower((string) $match[1]);
+    }
+
+    private function extractStringLength(string $method, string $args): ?int
+    {
+        if (! in_array($method, ['string', 'char'], true)) {
+            return null;
+        }
+
+        if (preg_match('/[\'\"][a-zA-Z0-9_]+[\'\"]\\s*,\\s*(\\d+)/', $args, $match)) {
+            return (int) $match[1];
+        }
+
+        return 255;
+    }
+
+    /**
+     * @return string[]
+     */
+    private function extractEnumOptions(string $method, string $args): array
+    {
+        if ($method !== 'enum') {
+            return [];
+        }
+
+        if (! preg_match_all('/[\'\"]([^\'\"]+)[\'\"]/', $args, $matches)) {
+            return [];
+        }
+
+        $values = array_map('strval', $matches[1] ?? []);
+
+        return array_values(array_unique(array_slice($values, 1)));
+    }
+
+    private function extractRelatedTableFromChain(string $chain): ?string
+    {
+        if (preg_match('/->constrained\\(\\s*[\'\"]([a-zA-Z0-9_]+)[\'\"]\\s*\\)/i', $chain, $match)) {
+            return strtolower((string) $match[1]);
+        }
+
+        return null;
+    }
+
+    /**
+     * @param array<string, mixed> $left
+     * @param array<string, mixed> $right
+     * @return array<string, mixed>
+     */
+    private function mergeDefinition(array $left, array $right): array
+    {
+        $merged = $left;
+
+        foreach ($right as $key => $value) {
+            if ($key === 'enum') {
+                $existing = is_array($merged[$key] ?? null) ? $merged[$key] : [];
+                $incoming = is_array($value) ? $value : [];
+                $merged[$key] = array_values(array_unique(array_merge($existing, $incoming)));
+                continue;
+            }
+
+            if (is_bool($value)) {
+                $merged[$key] = (bool) ($merged[$key] ?? false) || $value;
+                continue;
+            }
+
+            if ($value !== null && $value !== '') {
+                $merged[$key] = $value;
+            }
+        }
+
+        return $merged;
     }
 }
 PHP;

@@ -1289,10 +1289,19 @@ BLADE;
                     const fullWidth = /description|content|note|notes|address|bio|summary|details/i.test(col);
                     const wrapperClass = fullWidth ? 'sm:col-span-2' : '';
                     const baseClass = 'rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none ring-cyan-200 focus:ring';
-                    const placeholder = placeholderFromColumn(col, label, column.type);
+                    const inputType = String(column.input_type || '').toLowerCase();
+                    const placeholder = String(column.placeholder || '').trim() || placeholderFromColumn(col, label, column.type);
                     const placeholderAttr = placeholder ? ' placeholder="' + escapeAttr(placeholder) + '"' : '';
+                    const validationHint = column.validation
+                        ? '<p class="mt-1 text-[10px] font-medium text-slate-500">Validation: ' + escapeAttr(String(column.validation)) + '</p>'
+                        : '';
+                    const relationshipHint = column.relationship && column.relationship.related_table
+                        ? '<p class="mt-1 text-[10px] font-medium text-cyan-700">Relation: belongsTo ' + escapeAttr(String(column.relationship.related_table)) + '</p>'
+                        : '';
 
-                    if (column.is_foreign_key && Array.isArray(column.options) && column.options.length > 0) {
+                    const hintMarkup = validationHint + relationshipHint;
+
+                    if ((inputType === 'select' || column.is_foreign_key) && Array.isArray(column.options) && column.options.length > 0) {
                         const optionsHtml = ['<option value="">Select ' + label + '</option>'].concat(
                             column.options.map(function (option) {
                                 return '<option value="' + option.value + '">' + option.label + '</option>';
@@ -1301,18 +1310,59 @@ BLADE;
 
                         return '<div class="' + wrapperClass + '">' +
                             '<label class="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-700">' + label + '</label>' +
-                            '<select data-crud-field="' + col + '" class="' + baseClass + '"' + requiredAttr + '>' + optionsHtml + '</select>' +
+                            '<select data-crud-field="' + col + '" data-crud-type="select" class="' + baseClass + '"' + requiredAttr + '>' + optionsHtml + '</select>' +
+                            hintMarkup +
                         '</div>';
                     }
 
-                    const inputType = column.type === 'boolean'
-                        ? 'number'
-                        : (column.type === 'integer' || column.type === 'bigint' || column.type === 'decimal' || column.type === 'float' ? 'number' : (column.type === 'date' ? 'date' : (column.type === 'datetime' ? 'datetime-local' : 'text')));
-                    const stepAttr = inputType === 'number' ? ' step="any"' : '';
+                    if (inputType === 'textarea') {
+                        return '<div class="' + wrapperClass + '">' +
+                            '<label class="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-700">' + label + '</label>' +
+                            '<textarea data-crud-field="' + col + '" data-crud-type="textarea" rows="4" class="' + baseClass + '"' + requiredAttr + placeholderAttr + '></textarea>' +
+                            hintMarkup +
+                        '</div>';
+                    }
+
+                    if (inputType === 'checkbox') {
+                        return '<div class="' + wrapperClass + '">' +
+                            '<label class="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-700">' + label + '</label>' +
+                            '<label class="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-700">' +
+                                '<input data-crud-field="' + col + '" data-crud-type="checkbox" type="checkbox" class="h-4 w-4 rounded border-slate-300 text-cyan-600 focus:ring-cyan-500">' +
+                                '<span>Enabled</span>' +
+                            '</label>' +
+                            hintMarkup +
+                        '</div>';
+                    }
+
+                    const htmlInputType = (function () {
+                        if (inputType === 'email' || inputType === 'password' || inputType === 'tel' || inputType === 'date' || inputType === 'datetime-local' || inputType === 'number') {
+                            return inputType;
+                        }
+
+                        if (column.type === 'boolean') {
+                            return 'checkbox';
+                        }
+
+                        if (column.type === 'integer' || column.type === 'bigint' || column.type === 'decimal' || column.type === 'float') {
+                            return 'number';
+                        }
+
+                        if (column.type === 'date') {
+                            return 'date';
+                        }
+
+                        if (column.type === 'datetime') {
+                            return 'datetime-local';
+                        }
+
+                        return 'text';
+                    })();
+                    const stepAttr = htmlInputType === 'number' ? ' step="any"' : '';
 
                     return '<div class="' + wrapperClass + '">' +
                         '<label class="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-700">' + label + '</label>' +
-                        '<input data-crud-field="' + col + '" type="' + inputType + '" class="' + baseClass + '"' + stepAttr + requiredAttr + placeholderAttr + '>' +
+                        '<input data-crud-field="' + col + '" data-crud-type="' + htmlInputType + '" type="' + htmlInputType + '" class="' + baseClass + '"' + stepAttr + requiredAttr + placeholderAttr + '>' +
+                        hintMarkup +
                     '</div>';
                 }).join('');
             }
@@ -1326,8 +1376,25 @@ BLADE;
                         return;
                     }
 
+                    const fieldType = String(input.getAttribute('data-crud-type') || '').toLowerCase();
+                    if (fieldType === 'checkbox') {
+                        payload[column] = input.checked ? 1 : 0;
+                        return;
+                    }
+
                     const raw = (input.value || '').trim();
-                    payload[column] = raw === '' ? null : raw;
+                    if (raw === '') {
+                        payload[column] = null;
+                        return;
+                    }
+
+                    if (fieldType === 'number') {
+                        const num = Number(raw);
+                        payload[column] = Number.isFinite(num) ? num : raw;
+                        return;
+                    }
+
+                    payload[column] = raw;
                 });
 
                 return payload;
@@ -1821,14 +1888,17 @@ class AdminDashboardCrudController extends Controller
             $required = array_key_exists('nullable', $columnMeta)
                 ? ! (bool) $columnMeta['nullable']
                 : ! in_array($column, ['created_at', 'updated_at', 'deleted_at'], true);
+            $type = $this->columnType($table, $column);
 
             return [
                 'name' => $column,
-                'type' => $this->columnType($table, $column),
+                'type' => $type,
                 'required' => $required,
                 'is_foreign_key' => $isForeignKey,
                 'related_table' => $relatedTable,
                 'options' => $isForeignKey ? $this->foreignKeyOptions($relatedTable) : [],
+                'input_type' => $isForeignKey ? 'select' : $this->inferInputType($column, $type),
+                'placeholder' => $this->placeholderFor($column, $type, $isForeignKey ? 'select' : $this->inferInputType($column, $type)),
                 'validation' => $this->fieldValidationRule($table, $column, $columnMeta, $isForeignKey),
                 'relationship' => $isForeignKey ? $this->fieldRelationship($column) : null,
             ];
@@ -1867,17 +1937,7 @@ class AdminDashboardCrudController extends Controller
             return response()->json(['message' => 'Entity table not found'], 404);
         }
 
-        $metadata = $this->columnMetadata($table);
-        $rules = [];
-        foreach (Schema::getColumnListing($table) as $column) {
-            $isForeignKey = $this->relatedTableFromForeignKey($column) !== null;
-            $rulesForColumn = $this->fieldValidationRule($table, $column, $metadata[$column] ?? [], $isForeignKey);
-            if ($rulesForColumn !== '') {
-                $rules[$column] = $rulesForColumn;
-            }
-        }
-
-        $request->validate($rules);
+        $request->validate($this->validationRules($table));
 
         $payload = $this->payloadForTable($request, $table);
         if ($payload === []) {
@@ -1910,17 +1970,12 @@ class AdminDashboardCrudController extends Controller
             return response()->json(['message' => 'Entity does not support ID-based updates'], 422);
         }
 
-        $metadata = $this->columnMetadata($table);
-        $rules = [];
-        foreach (Schema::getColumnListing($table) as $column) {
-            $isForeignKey = $this->relatedTableFromForeignKey($column) !== null;
-            $rulesForColumn = $this->fieldValidationRule($table, $column, $metadata[$column] ?? [], $isForeignKey);
-            if ($rulesForColumn !== '') {
-                $rules[$column] = $rulesForColumn;
-            }
+        $exists = DB::table($table)->where('id', $id)->exists();
+        if (! $exists) {
+            return response()->json(['message' => 'Record not found'], 404);
         }
 
-        $request->validate($rules);
+        $request->validate($this->validationRules($table, true, $id));
 
         $payload = $this->payloadForTable($request, $table);
         if ($payload === []) {
@@ -1933,11 +1988,6 @@ class AdminDashboardCrudController extends Controller
         $foreignKeyError = $this->validateForeignKeys($table, $payload);
         if ($foreignKeyError !== null) {
             return response()->json(['message' => $foreignKeyError], 422);
-        }
-
-        $exists = DB::table($table)->where('id', $id)->exists();
-        if (! $exists) {
-            return response()->json(['message' => 'Record not found'], 404);
         }
 
         DB::table($table)->where('id', $id)->update($payload);
@@ -2010,58 +2060,6 @@ class AdminDashboardCrudController extends Controller
         }
 
         return $data;
-    }
-
-    private function fieldValidationRule(string $table, string $column, array $columnMeta, bool $isForeignKey): string
-    {
-        if (in_array($column, ['id', 'created_at', 'updated_at', 'deleted_at'], true)) {
-            return '';
-        }
-
-        $rules = [];
-        $nullable = array_key_exists('nullable', $columnMeta) && $columnMeta['nullable'];
-        $rules[] = $nullable ? 'nullable' : 'required';
-
-        if ($isForeignKey) {
-            $rules[] = 'integer';
-            $related = $this->relatedTableFromForeignKey($column);
-            if ($related !== null) {
-                $rules[] = 'exists:'.$related.',id';
-            }
-
-            return implode('|', $rules);
-        }
-
-        if (str_contains($column, 'email')) {
-            $rules[] = 'email';
-            if (! $nullable) {
-                $rules[] = 'unique:'.$table.','.$column;
-            }
-        } elseif (in_array($this->columnType($table, $column), ['integer', 'bigint', 'smallint', 'decimal', 'float', 'double', 'numeric'], true)) {
-            $rules[] = 'integer';
-        } elseif (in_array($this->columnType($table, $column), ['boolean', 'bool'], true)) {
-            $rules[] = 'boolean';
-        } elseif (str_contains($this->columnType($table, $column), 'date') || str_contains($this->columnType($table, $column), 'timestamp') || str_contains($this->columnType($table, $column), 'datetime')) {
-            $rules[] = 'date';
-        } else {
-            $rules[] = 'string';
-            $rules[] = 'max:255';
-        }
-
-        return implode('|', array_filter($rules));
-    }
-
-    private function fieldRelationship(string $column): array
-    {
-        $relatedTable = $this->relatedTableFromForeignKey($column);
-        $relatedModel = $relatedTable ? Str::studly(Str::singular($relatedTable)) : null;
-
-        return [
-            'type' => 'belongsTo',
-            'table' => $relatedTable,
-            'model' => $relatedModel,
-            'method' => $relatedModel ? lcfirst($relatedModel) : null,
-        ];
     }
 
     private function validateForeignKeys(string $table, array $payload): ?string
@@ -2161,6 +2159,153 @@ class AdminDashboardCrudController extends Controller
         } catch (\Throwable $e) {
             return [];
         }
+    }
+
+    /** @return array<string, string> */
+    private function validationRules(string $table, bool $forUpdate = false, ?int $ignoreId = null): array
+    {
+        $metadata = $this->columnMetadata($table);
+        $rules = [];
+
+        foreach (Schema::getColumnListing($table) as $column) {
+            $isForeignKey = $this->relatedTableFromForeignKey($column) !== null;
+            $rule = $this->fieldValidationRule($table, $column, $metadata[$column] ?? [], $isForeignKey, $forUpdate, $ignoreId);
+            if ($rule !== '') {
+                $rules[$column] = $rule;
+            }
+        }
+
+        return $rules;
+    }
+
+    private function fieldValidationRule(string $table, string $column, array $columnMeta, bool $isForeignKey, bool $forUpdate = false, ?int $ignoreId = null): string
+    {
+        if (in_array($column, ['id', 'created_at', 'updated_at', 'deleted_at'], true)) {
+            return '';
+        }
+
+        $rules = [];
+        if ($forUpdate) {
+            $rules[] = 'sometimes';
+        }
+
+        $nullable = (bool) ($columnMeta['nullable'] ?? false);
+        $rules[] = $nullable ? 'nullable' : 'required';
+
+        $type = strtolower($this->columnType($table, $column));
+        if ($isForeignKey) {
+            $related = $this->relatedTableFromForeignKey($column);
+            $rules[] = 'integer';
+            if ($related !== null) {
+                $rules[] = "exists:{$related},id";
+            }
+        } elseif (in_array($type, ['integer', 'bigint', 'smallint', 'tinyint'], true)) {
+            $rules[] = 'integer';
+        } elseif (in_array($type, ['decimal', 'float', 'double'], true)) {
+            $rules[] = 'numeric';
+        } elseif (in_array($type, ['boolean', 'bool'], true)) {
+            $rules[] = 'boolean';
+        } elseif (in_array($type, ['date', 'datetime', 'timestamp'], true)) {
+            $rules[] = 'date';
+        } else {
+            $rules[] = 'string';
+            if (in_array($type, ['string', 'char', 'varchar'], true)) {
+                $rules[] = 'max:255';
+            }
+        }
+
+        if (str_contains(strtolower($column), 'email')) {
+            $rules[] = 'email';
+            $rules[] = $forUpdate && $ignoreId !== null
+                ? "unique:{$table},{$column},{$ignoreId},id"
+                : "unique:{$table},{$column}";
+        }
+
+        return implode('|', array_values(array_unique($rules)));
+    }
+
+    /** @return array<string, string> */
+    private function fieldRelationship(string $column): array
+    {
+        $base = Str::beforeLast($column, '_id');
+        $relatedTable = Str::plural($base);
+        $modelClass = Str::studly(Str::singular($relatedTable));
+
+        return [
+            'type' => 'belongsTo',
+            'method' => Str::camel($base),
+            'foreign_key' => $column,
+            'related_table' => $relatedTable,
+            'related_model' => "App\\Models\\{$modelClass}",
+            'eloquent' => "public function ".Str::camel($base)."() { return \$this->belongsTo(\\App\\Models\\{$modelClass}::class, '{$column}'); }",
+        ];
+    }
+
+    private function inferInputType(string $column, string $columnType): string
+    {
+        $name = strtolower(trim($column));
+        $type = strtolower(trim($columnType));
+
+        if (str_contains($type, 'date') && ! str_contains($type, 'time')) {
+            return 'date';
+        }
+
+        if (str_contains($type, 'time') || str_contains($type, 'timestamp') || str_contains($type, 'datetime')) {
+            return 'datetime-local';
+        }
+
+        if (in_array($type, ['integer', 'bigint', 'smallint', 'decimal', 'float', 'double'], true)) {
+            return 'number';
+        }
+
+        if (in_array($type, ['boolean', 'bool'], true) || str_starts_with($name, 'is_') || str_starts_with($name, 'has_')) {
+            return 'checkbox';
+        }
+
+        if (str_contains($name, 'description') || str_contains($name, 'content') || str_contains($name, 'notes')) {
+            return 'textarea';
+        }
+
+        if (str_contains($name, 'email')) {
+            return 'email';
+        }
+
+        if (str_contains($name, 'phone') || str_contains($name, 'mobile')) {
+            return 'tel';
+        }
+
+        if (str_contains($name, 'password')) {
+            return 'password';
+        }
+
+        return 'text';
+    }
+
+    private function placeholderFor(string $column, string $columnType, string $inputType): string
+    {
+        $label = ucwords(str_replace('_', ' ', strtolower(trim($column))));
+
+        if ($inputType === 'select') {
+            return 'Select '.$label;
+        }
+
+        if ($inputType === 'date') {
+            return 'Pick '.$label;
+        }
+
+        if ($inputType === 'datetime-local') {
+            return 'Pick '.$label.' date and time';
+        }
+
+        if ($inputType === 'email') {
+            return 'example@domain.com';
+        }
+
+        if (str_contains(strtolower($columnType), 'text') || $inputType === 'textarea') {
+            return 'Enter '.$label;
+        }
+
+        return 'Enter '.$label;
     }
 }
 PHP;

@@ -7,12 +7,16 @@ The package is designed for teams that want a fast and repeatable admin bootstra
 ## Highlights
 
 - Single setup entrypoint: `php artisan admin:setup`
+- Roles and permissions scaffold: `php artisan admin:roles`
+- Migration CRUD backend generator: `php artisan admin:generate-entity`
 - Interactive or non-interactive setup
 - Admin user create/login verification flow
 - Sanctum token issuance
 - API auth endpoint provisioning (`/api/auth/login`, `/api/auth/logout`, `/api/auth/me`)
 - Migration-driven CRUD generation (entities discovered from migrations)
 - Auto-generated CRUD controller/routes plus React CRUD modals and forms
+- Validation auto-generation from migration/schema metadata
+- Relationship detection with belongsTo metadata and select options
 - React frontend scaffold (Vite + Tailwind v4 + Redux Toolkit + Router + Axios + React Icons)
 - Safe regeneration using `--force`
 
@@ -36,13 +40,15 @@ composer require elmekadem/architector-admin
 
 Laravel package discovery registers the provider automatically.
 
-## The Only Setup Command
+## Available Commands
 
 ```bash
 php artisan admin:setup
+php artisan admin:roles
+php artisan admin:generate-entity
 ```
 
-This is the only supported command for creating the admin dashboard setup flow.
+Recommended flow is still `admin:setup` first, then `admin:roles` when you need role-based protection.
 
 ## Command Options
 
@@ -146,6 +152,34 @@ Auth endpoints provisioned by setup:
 Generated frontend also targets admin dashboard endpoints under:
 
 - `/api/admin-dashboard/...`
+
+## Roles and Permissions
+
+Generate baseline role management scaffolding:
+
+```bash
+php artisan admin:roles
+```
+
+This command generates:
+
+- Roles: `admin`, `editor`, `user`
+- Permissions: `create`, `edit`, `delete`
+- Seeder: `database/seeders/AdminRolesSeeder.php`
+- Middleware: `App\Http\Middleware\AdminRolePermissionMiddleware`
+- Middleware alias: `admin.role` in `bootstrap/app.php`
+
+Route usage examples:
+
+```php
+Route::middleware(['auth:sanctum', 'admin.role:role:admin'])->group(function () {
+  // admin-only routes
+});
+
+Route::middleware(['auth:sanctum', 'admin.role:permission:edit'])->group(function () {
+  // editor/admin routes with edit permission
+});
+```
 
 ## Publishing Assets (Optional)
 

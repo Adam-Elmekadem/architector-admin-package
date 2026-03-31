@@ -7,7 +7,10 @@ use Illuminate\Support\ServiceProvider;
 class ArchitectorServiceProvider extends ServiceProvider
 {
     private const COMMANDS = [
+        'Elmekadem\\ArchitectorAdmin\\Console\\Commands\\AdminGenerateEntity',
+        'Elmekadem\\ArchitectorAdmin\\Console\\Commands\\AdminRoles',
         'Elmekadem\\ArchitectorAdmin\\Console\\Commands\\AdminSetup',
+        'Elmekadem\\ArchitectorAdmin\\Console\\Commands\\MakeAdmin',
     ];
 
     /**
