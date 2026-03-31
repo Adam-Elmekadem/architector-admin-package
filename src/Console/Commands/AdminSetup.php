@@ -1966,7 +1966,7 @@ function EntityPage({ token, currentUser, onLogout }) {
         const nextRow = {};
         editableColumns.forEach((column) => {
             if (column.name !== 'id') {
-                nextRow[column.name] = '';
+                nextRow[column.name] = column.input_type === 'checkbox' ? 0 : '';
             }
         });
         setEditingRow(nextRow);
@@ -2025,6 +2025,33 @@ function EntityPage({ token, currentUser, onLogout }) {
         if (normalizedName.includes('name')) return `Enter ${label}`;
 
         return `Enter ${label}`;
+    };
+
+    const inputTypeForField = (column) => {
+        const hintedType = String(column?.input_type || '').toLowerCase();
+        const dbType = String(column?.type || '').toLowerCase();
+
+        if (['email', 'password', 'tel', 'date', 'datetime-local', 'number', 'checkbox'].includes(hintedType)) {
+            return hintedType;
+        }
+
+        if (dbType.includes('int') || dbType === 'decimal' || dbType === 'float' || dbType === 'double') {
+            return 'number';
+        }
+
+        if (dbType === 'date') {
+            return 'date';
+        }
+
+        if (dbType.includes('datetime') || dbType.includes('timestamp')) {
+            return 'datetime-local';
+        }
+
+        if (dbType === 'boolean' || dbType === 'bool') {
+            return 'checkbox';
+        }
+
+        return 'text';
     };
 
     return (
@@ -2295,7 +2322,10 @@ function EntityPage({ token, currentUser, onLogout }) {
                             ).map((column) => (
                                 column.name !== 'id' && (
                                     <label key={column.name} className="block">
-                                        <span className="mb-1 block text-xs uppercase tracking-wide text-slate-500">{column.name}</span>
+                                        <span className="mb-1 block text-xs uppercase tracking-wide text-slate-500">
+                                            {column.name}
+                                            {column.required ? ' *' : ''}
+                                        </span>
                                         {(column.input_type === 'select' || column.is_foreign_key) && Array.isArray(column.options) && column.options.length > 0 ? (
                                             <select
                                                 value={String(editingRow[column.name] ?? '')}
@@ -2377,18 +2407,24 @@ function EntityPage({ token, currentUser, onLogout }) {
                                                 }
                                                 className="min-h-24 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 outline-none focus:border-slate-500"
                                             />
+                                        ) : inputTypeForField(column) === 'checkbox' ? (
+                                            <label className="inline-flex h-10 w-full items-center gap-3 rounded-lg border border-slate-700 bg-slate-950 px-3 text-sm text-slate-100">
+                                                <input
+                                                    type="checkbox"
+                                                    checked={Number(editingRow[column.name] ?? 0) === 1 || editingRow[column.name] === true}
+                                                    onChange={(event) =>
+                                                        setEditingRow((current) => ({
+                                                            ...current,
+                                                            [column.name]: event.target.checked ? 1 : 0,
+                                                        }))
+                                                    }
+                                                />
+                                                <span>Enabled</span>
+                                            </label>
                                         ) : (
                                             <input
                                                 value={editingRow[column.name] ?? ''}
-                                                type={
-                                                    column.input_type === 'date'
-                                                        ? 'date'
-                                                        : column.input_type === 'datetime-local'
-                                                            ? 'datetime-local'
-                                                            : (column.input_type === 'number' || String(column.type || '').includes('int'))
-                                                                ? 'number'
-                                                                : 'text'
-                                                }
+                                                type={inputTypeForField(column)}
                                                 placeholder={column.placeholder || placeholderForField(column.name, column.type)}
                                                 onChange={(event) =>
                                                     setEditingRow((current) => ({
@@ -2399,6 +2435,12 @@ function EntityPage({ token, currentUser, onLogout }) {
                                                 className="h-10 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 text-sm text-slate-100 outline-none focus:border-slate-500"
                                             />
                                         )}
+                                        {column.validation ? (
+                                            <span className="mt-1 block text-[11px] text-slate-500">Validation: {String(column.validation)}</span>
+                                        ) : null}
+                                        {column.relationship?.related_table ? (
+                                            <span className="mt-1 block text-[11px] text-cyan-400">Relation: belongsTo {String(column.relationship.related_table)}</span>
+                                        ) : null}
                                     </label>
                                 )
                             ))}

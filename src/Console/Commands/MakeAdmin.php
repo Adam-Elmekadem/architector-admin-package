@@ -1289,19 +1289,10 @@ BLADE;
                     const fullWidth = /description|content|note|notes|address|bio|summary|details/i.test(col);
                     const wrapperClass = fullWidth ? 'sm:col-span-2' : '';
                     const baseClass = 'rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none ring-cyan-200 focus:ring';
-                    const inputType = String(column.input_type || '').toLowerCase();
-                    const placeholder = String(column.placeholder || '').trim() || placeholderFromColumn(col, label, column.type);
+                    const placeholder = placeholderFromColumn(col, label, column.type);
                     const placeholderAttr = placeholder ? ' placeholder="' + escapeAttr(placeholder) + '"' : '';
-                    const validationHint = column.validation
-                        ? '<p class="mt-1 text-[10px] font-medium text-slate-500">Validation: ' + escapeAttr(String(column.validation)) + '</p>'
-                        : '';
-                    const relationshipHint = column.relationship && column.relationship.related_table
-                        ? '<p class="mt-1 text-[10px] font-medium text-cyan-700">Relation: belongsTo ' + escapeAttr(String(column.relationship.related_table)) + '</p>'
-                        : '';
 
-                    const hintMarkup = validationHint + relationshipHint;
-
-                    if ((inputType === 'select' || column.is_foreign_key) && Array.isArray(column.options) && column.options.length > 0) {
+                    if (column.is_foreign_key && Array.isArray(column.options) && column.options.length > 0) {
                         const optionsHtml = ['<option value="">Select ' + label + '</option>'].concat(
                             column.options.map(function (option) {
                                 return '<option value="' + option.value + '">' + option.label + '</option>';
@@ -1310,59 +1301,18 @@ BLADE;
 
                         return '<div class="' + wrapperClass + '">' +
                             '<label class="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-700">' + label + '</label>' +
-                            '<select data-crud-field="' + col + '" data-crud-type="select" class="' + baseClass + '"' + requiredAttr + '>' + optionsHtml + '</select>' +
-                            hintMarkup +
+                            '<select data-crud-field="' + col + '" class="' + baseClass + '"' + requiredAttr + '>' + optionsHtml + '</select>' +
                         '</div>';
                     }
 
-                    if (inputType === 'textarea') {
-                        return '<div class="' + wrapperClass + '">' +
-                            '<label class="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-700">' + label + '</label>' +
-                            '<textarea data-crud-field="' + col + '" data-crud-type="textarea" rows="4" class="' + baseClass + '"' + requiredAttr + placeholderAttr + '></textarea>' +
-                            hintMarkup +
-                        '</div>';
-                    }
-
-                    if (inputType === 'checkbox') {
-                        return '<div class="' + wrapperClass + '">' +
-                            '<label class="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-700">' + label + '</label>' +
-                            '<label class="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-700">' +
-                                '<input data-crud-field="' + col + '" data-crud-type="checkbox" type="checkbox" class="h-4 w-4 rounded border-slate-300 text-cyan-600 focus:ring-cyan-500">' +
-                                '<span>Enabled</span>' +
-                            '</label>' +
-                            hintMarkup +
-                        '</div>';
-                    }
-
-                    const htmlInputType = (function () {
-                        if (inputType === 'email' || inputType === 'password' || inputType === 'tel' || inputType === 'date' || inputType === 'datetime-local' || inputType === 'number') {
-                            return inputType;
-                        }
-
-                        if (column.type === 'boolean') {
-                            return 'checkbox';
-                        }
-
-                        if (column.type === 'integer' || column.type === 'bigint' || column.type === 'decimal' || column.type === 'float') {
-                            return 'number';
-                        }
-
-                        if (column.type === 'date') {
-                            return 'date';
-                        }
-
-                        if (column.type === 'datetime') {
-                            return 'datetime-local';
-                        }
-
-                        return 'text';
-                    })();
-                    const stepAttr = htmlInputType === 'number' ? ' step="any"' : '';
+                    const inputType = column.type === 'boolean'
+                        ? 'number'
+                        : (column.type === 'integer' || column.type === 'bigint' || column.type === 'decimal' || column.type === 'float' ? 'number' : (column.type === 'date' ? 'date' : (column.type === 'datetime' ? 'datetime-local' : 'text')));
+                    const stepAttr = inputType === 'number' ? ' step="any"' : '';
 
                     return '<div class="' + wrapperClass + '">' +
                         '<label class="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-700">' + label + '</label>' +
-                        '<input data-crud-field="' + col + '" data-crud-type="' + htmlInputType + '" type="' + htmlInputType + '" class="' + baseClass + '"' + stepAttr + requiredAttr + placeholderAttr + '>' +
-                        hintMarkup +
+                        '<input data-crud-field="' + col + '" type="' + inputType + '" class="' + baseClass + '"' + stepAttr + requiredAttr + placeholderAttr + '>' +
                     '</div>';
                 }).join('');
             }
@@ -1376,25 +1326,8 @@ BLADE;
                         return;
                     }
 
-                    const fieldType = String(input.getAttribute('data-crud-type') || '').toLowerCase();
-                    if (fieldType === 'checkbox') {
-                        payload[column] = input.checked ? 1 : 0;
-                        return;
-                    }
-
                     const raw = (input.value || '').trim();
-                    if (raw === '') {
-                        payload[column] = null;
-                        return;
-                    }
-
-                    if (fieldType === 'number') {
-                        const num = Number(raw);
-                        payload[column] = Number.isFinite(num) ? num : raw;
-                        return;
-                    }
-
-                    payload[column] = raw;
+                    payload[column] = raw === '' ? null : raw;
                 });
 
                 return payload;
